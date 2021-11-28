@@ -141,8 +141,35 @@ impl BCacheSB {
     }
 }
 
+#[derive(Debug)]
 pub struct BCacheCache {
     pub sb: BCacheSB,
+    pub nbuckets: u64,
+    pub block_size: u16,
+    pub bucket_size: u64,
+    pub nr_in_set: u16,
+    pub nr_this_dev: u16,
+}
+
+impl BCacheCache {
+    fn new(sb: BCacheSB, sb_data: [u8; 16]) -> Result<BCacheCache> {
+        let (_, parts) = nom::sequence::tuple((
+            nom::number::complete::le_u64, // nbuckets
+            nom::number::complete::le_u16, // block_size
+            nom::number::complete::le_u16, // bucket_size
+            nom::number::complete::le_u16, // nr_in_set
+            nom::number::complete::le_u16, // nr_this_dev
+        ))(&sb_data[..])?;
+
+        Ok(BCacheCache {
+            sb: sb,
+            nbuckets: parts.0,
+            block_size: parts.1,
+            bucket_size: parts.2.into(),
+            nr_in_set: parts.3,
+            nr_this_dev: parts.4,
+        })
+    }
 }
 
 pub struct BCacheBacking {
@@ -159,9 +186,9 @@ pub fn open_device(path: &str) -> Result<BCacheDev> {
 
     f.seek(io::SeekFrom::Start(4096))?; // Superblock offset
 
-    let (sb, _data) = BCacheSB::read(&f)?;
+    let (sb, data) = BCacheSB::read(&f)?;
     Ok(if sb.is_cache() {
-        BCacheDev::Cache(BCacheCache { sb: sb })
+        BCacheDev::Cache(BCacheCache::new(sb, data)?)
     } else {
         BCacheDev::Backing(BCacheBacking { sb: sb })
     })
