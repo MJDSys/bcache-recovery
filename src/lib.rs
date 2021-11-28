@@ -1,3 +1,4 @@
+mod crc;
 mod error;
 
 use crate::error::Result;
@@ -18,6 +19,10 @@ const _BCACHE_SB_VERSION_BDEV_WITH_FEATURES: u64 = 6;
 const BCACHE_MAGIC: [u8; 16] = [
     0xc6, 0x85, 0x73, 0xf6, 0x4e, 0x1a, 0x45, 0xca, 0x82, 0x65, 0xf5, 0x7f, 0x48, 0xba, 0x6d, 0x81,
 ];
+
+fn bcache_crc64(input: &[u8]) -> u64 {
+    return crc::crc64_be(u64::MAX, input) ^ u64::MAX;
+}
 
 #[derive(Debug)]
 pub struct BCacheSB {
@@ -51,8 +56,9 @@ impl BCacheSB {
         dev.read(&mut page)?;
         let page = page;
 
-        let (_, parts) = nom::sequence::tuple((
-            nom::number::complete::le_u64,          //csum
+        let (header, csum) = nom::number::complete::le_u64(&page[..])?;
+
+        let (after_header, parts) = nom::sequence::tuple((
             nom::number::complete::le_u64,          //offset
             nom::number::complete::le_u64,          //version
             nom::bytes::complete::take(16usize),    //magic
@@ -69,26 +75,24 @@ impl BCacheSB {
             nom::number::complete::le_u32,          // last_mount
             nom::number::complete::le_u16,          // first_bucket
             nom::number::complete::le_u16,          // njournal_buckets/keys
-            get_d,                                  // d (journal buckets)
-            nom::number::complete::le_u16,          // obso_bucket_size_hi
-        ))(&page[..])?;
+        ))(header)?;
 
         let mut sb = BCacheSB {
-            offset: parts.1,
-            version: parts.2,
+            offset: parts.0,
+            version: parts.1,
             magic: [0; 16],
             uuid: [0; 16],
             set_uuid: [0; 16],
             label: [0; 32],
-            flags: parts.7,
-            seq: parts.8,
-            feature_compat: parts.9,
-            feature_incompat: parts.10,
-            feature_ro_compat: parts.11,
-            last_mount: parts.14,
-            first_bucket: parts.15,
-            njournal_buckets_or_keys: parts.16,
-            data: parts.17,
+            flags: parts.6,
+            seq: parts.7,
+            feature_compat: parts.8,
+            feature_incompat: parts.9,
+            feature_ro_compat: parts.10,
+            last_mount: parts.13,
+            first_bucket: parts.14,
+            njournal_buckets_or_keys: parts.15,
+            data: get_d(after_header)?.1,
         };
 
         if sb.version != BCACHE_SB_VERSION_CDEV_WITH_UUID && sb.version != BCACHE_SB_VERSION_BDEV {
@@ -103,19 +107,28 @@ impl BCacheSB {
             )));
         }
 
-        sb.magic.copy_from_slice(parts.3);
+        sb.magic.copy_from_slice(parts.2);
         if sb.magic != BCACHE_MAGIC {
             return Err(BCacheError::BCacheError(BCacheErrorKind::BadMagic(
                 sb.magic,
             )));
         }
 
-        sb.uuid.copy_from_slice(parts.4);
-        sb.set_uuid.copy_from_slice(parts.5);
-        sb.label.copy_from_slice(parts.6);
+        let header_size = after_header.as_ptr() as usize - header.as_ptr() as usize;
+        let crc =
+            bcache_crc64(&header[0..(header_size + 8 * sb.njournal_buckets_or_keys as usize)]);
+        if crc != csum {
+            return Err(BCacheError::BCacheError(BCacheErrorKind::BadChecksum(
+                csum, crc,
+            )));
+        }
+
+        sb.uuid.copy_from_slice(parts.3);
+        sb.set_uuid.copy_from_slice(parts.4);
+        sb.label.copy_from_slice(parts.5);
 
         let mut device_data = [0; 16];
-        device_data[..].copy_from_slice(parts.13);
+        device_data[..].copy_from_slice(parts.12);
         Ok((sb, device_data))
     }
 

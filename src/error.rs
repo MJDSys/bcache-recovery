@@ -30,6 +30,7 @@ pub enum BCacheErrorKind {
     UnsupportedVersion(u64),
     BadOffset(u64),
     BadMagic([u8; 16]),
+    BadChecksum(u64, u64),
 }
 
 impl Display for BCacheErrorKind {
