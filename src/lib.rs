@@ -124,6 +124,10 @@ impl BCacheSB {
         }
 
         sb.uuid.copy_from_slice(parts.3);
+        if sb.uuid.iter().all(|&x| x == 0) {
+            return Err(BCacheError::BCacheError(BCacheErrorKind::BadUuid(sb.uuid)));
+        }
+
         sb.set_uuid.copy_from_slice(parts.4);
         sb.label.copy_from_slice(parts.5);
 

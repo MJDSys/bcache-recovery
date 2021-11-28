@@ -31,6 +31,7 @@ pub enum BCacheErrorKind {
     BadOffset(u64),
     BadMagic([u8; 16]),
     BadChecksum(u64, u64),
+    BadUuid([u8; 16]),
 }
 
 impl Display for BCacheErrorKind {
