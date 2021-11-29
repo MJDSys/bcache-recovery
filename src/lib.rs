@@ -3,8 +3,10 @@ mod error;
 
 use crate::error::Result;
 
+use modular_bitfield::prelude::*;
 use nom;
 
+use std::fmt::{Debug, Formatter};
 use std::fs::File;
 use std::io;
 use std::io::prelude::*;
@@ -22,6 +24,76 @@ const BCACHE_MAGIC: [u8; 16] = [
 
 fn bcache_crc64(input: &[u8]) -> u64 {
     return crc::crc64_be(u64::MAX, input) ^ u64::MAX;
+}
+
+#[derive(BitfieldSpecifier, Debug)]
+#[bits = 2]
+pub enum CacheReplacement {
+    Lru,
+    Fifo,
+    Random,
+}
+
+#[bitfield(bits = 64)]
+#[repr(u64)]
+pub struct CacheFlags {
+    pub sync: bool,
+    pub discard: bool,
+    pub replacement: CacheReplacement,
+    #[skip]
+    __: B60,
+}
+
+impl Debug for CacheFlags {
+    fn fmt(&self, f: &mut Formatter) -> std::result::Result<(), std::fmt::Error> {
+        write!(
+            f,
+            "CacheFlags {{ sync: {:?}, discard: {:?}, replacement: {:?} }}",
+            self.sync(),
+            self.discard(),
+            self.replacement()
+        )
+    }
+}
+
+#[derive(BitfieldSpecifier, Debug)]
+#[bits = 4]
+pub enum CacheMode {
+    WriteThough,
+    WriteBack,
+    WriteAround,
+    None,
+}
+
+#[derive(BitfieldSpecifier, Debug)]
+#[bits = 2]
+pub enum BackingState {
+    None,
+    Clean,
+    Dirty,
+    Stale,
+}
+
+#[bitfield(bits = 64)]
+#[repr(u64)]
+pub struct BackingFlags {
+    pub mode: CacheMode,
+    #[skip]
+    __: B57,
+    state: BackingState,
+    #[skip]
+    ___: B1,
+}
+
+impl Debug for BackingFlags {
+    fn fmt(&self, f: &mut Formatter) -> std::result::Result<(), std::fmt::Error> {
+        write!(
+            f,
+            "BackingFlags {{ mode: {:?}, state: {:?} }}",
+            self.mode(),
+            self.state()
+        )
+    }
 }
 
 #[derive(Debug)]
@@ -149,6 +221,7 @@ pub struct BCacheCache {
     pub bucket_size: u64,
     pub nr_in_set: u16,
     pub nr_this_dev: u16,
+    pub flags: CacheFlags,
 }
 
 impl BCacheCache {
@@ -162,12 +235,13 @@ impl BCacheCache {
         ))(&sb_data[..])?;
 
         Ok(BCacheCache {
-            sb: sb,
             nbuckets: parts.0,
             block_size: parts.1,
             bucket_size: parts.2.into(),
             nr_in_set: parts.3,
             nr_this_dev: parts.4,
+            flags: sb.flags.into(),
+            sb: sb,
         })
     }
 }
@@ -176,13 +250,15 @@ impl BCacheCache {
 pub struct BCacheBacking {
     pub sb: BCacheSB,
     pub data_offset: u64,
+    pub flags: BackingFlags,
 }
 
 impl BCacheBacking {
     fn new(sb: BCacheSB) -> Result<BCacheBacking> {
         Ok(BCacheBacking {
-            sb: sb,
             data_offset: 16,
+            flags: sb.flags.into(),
+            sb: sb,
         })
     }
 }
