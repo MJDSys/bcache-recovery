@@ -235,7 +235,7 @@ impl BCacheCache {
             nom::number::complete::le_u16, // nr_this_dev
         ))(&sb_data[..])?;
 
-        Ok(BCacheCache {
+        let ret = BCacheCache {
             nbuckets: parts.0,
             block_size: parts.1,
             bucket_size: parts.2.into(),
@@ -243,7 +243,14 @@ impl BCacheCache {
             nr_this_dev: parts.4,
             flags: sb.flags.into(),
             sb,
-        })
+        };
+        if !ret.flags.sync() {
+            Err(BCacheRecoveryError::UnsupportedFeature(
+                UnsupportedFeatureKind::NonSynchronousCache,
+            ))
+        } else {
+            Ok(ret)
+        }
     }
 }
 

@@ -12,6 +12,8 @@ pub enum BCacheRecoveryError {
     ShortRead,
     #[error("Unrecoverable BCache error {0}")]
     BCacheError(BCacheErrorKind),
+    #[error("Unsupported feature {0}")]
+    UnsupportedFeature(UnsupportedFeatureKind),
 }
 
 impl From<nom::Err<nom::error::Error<&[u8]>>> for BCacheRecoveryError {
@@ -35,6 +37,17 @@ pub enum BCacheErrorKind {
 }
 
 impl Display for BCacheErrorKind {
+    fn fmt(&self, f: &mut Formatter) -> std::result::Result<(), std::fmt::Error> {
+        write!(f, "{:?}", self)
+    }
+}
+
+#[derive(Debug)]
+pub enum UnsupportedFeatureKind {
+    NonSynchronousCache,
+}
+
+impl Display for UnsupportedFeatureKind {
     fn fmt(&self, f: &mut Formatter) -> std::result::Result<(), std::fmt::Error> {
         write!(f, "{:?}", self)
     }
