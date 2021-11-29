@@ -1,0 +1,26 @@
+image: "docker.mjdsystems.ca/docker/rust-builder"
+
+stages:
+  - build
+
+test:cargo:debug:
+  stage:
+    build
+  script:
+  - rustc --version && cargo --version
+  - cargo build --verbose
+  - cargo test --verbose
+
+test:cargo:release:
+  stage:
+    build
+  script:
+  - rustc --version && cargo --version
+  - cargo build --release --verbose
+  - cargo test --release --verbose
+
+test:rustfmt:
+  stage:
+    build
+  script:
+  - cargo fmt -- --check
