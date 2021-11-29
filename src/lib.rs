@@ -172,8 +172,19 @@ impl BCacheCache {
     }
 }
 
+#[derive(Debug)]
 pub struct BCacheBacking {
     pub sb: BCacheSB,
+    pub data_offset: u64,
+}
+
+impl BCacheBacking {
+    fn new(sb: BCacheSB) -> Result<BCacheBacking> {
+        Ok(BCacheBacking {
+            sb: sb,
+            data_offset: 16,
+        })
+    }
 }
 
 pub enum BCacheDev {
@@ -190,6 +201,6 @@ pub fn open_device(path: &str) -> Result<BCacheDev> {
     Ok(if sb.is_cache() {
         BCacheDev::Cache(BCacheCache::new(sb, data)?)
     } else {
-        BCacheDev::Backing(BCacheBacking { sb: sb })
+        BCacheDev::Backing(BCacheBacking::new(sb)?)
     })
 }
