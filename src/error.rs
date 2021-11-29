@@ -3,7 +3,7 @@ use std::io;
 use thiserror::Error;
 
 #[derive(Debug, Error)]
-pub enum BCacheError {
+pub enum BCacheRecoveryError {
     #[error("IO Error {0}")]
     IoError(#[from] io::Error),
     #[error("Response parse error {0}")]
@@ -14,7 +14,7 @@ pub enum BCacheError {
     BCacheError(BCacheErrorKind),
 }
 
-impl From<nom::Err<nom::error::Error<&[u8]>>> for BCacheError {
+impl From<nom::Err<nom::error::Error<&[u8]>>> for BCacheRecoveryError {
     fn from(original_error: nom::Err<nom::error::Error<&[u8]>>) -> Self {
         match original_error {
             nom::Err::Failure(e) | nom::Err::Error(e) => Self::ParseError(nom::Err::Failure(
@@ -40,4 +40,4 @@ impl Display for BCacheErrorKind {
     }
 }
 
-pub(crate) type Result<T> = std::result::Result<T, BCacheError>;
+pub(crate) type Result<T> = std::result::Result<T, BCacheRecoveryError>;

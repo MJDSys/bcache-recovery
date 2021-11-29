@@ -4,7 +4,6 @@ mod error;
 use crate::error::Result;
 
 use modular_bitfield::prelude::*;
-use nom;
 
 use std::fmt::{Debug, Formatter};
 use std::fs::File;
@@ -23,7 +22,7 @@ const BCACHE_MAGIC: [u8; 16] = [
 ];
 
 fn bcache_crc64(input: &[u8]) -> u64 {
-    return crc::crc64_be(u64::MAX, input) ^ u64::MAX;
+    crc::crc64_be(u64::MAX, input) ^ u64::MAX
 }
 
 #[derive(BitfieldSpecifier, Debug)]
@@ -125,7 +124,7 @@ impl BCacheSB {
     fn read(mut dev: impl Read) -> Result<(BCacheSB, [u8; 16])> {
         let mut page = [0u8; 4096];
 
-        dev.read(&mut page)?;
+        dev.read_exact(&mut page)?;
         let page = page;
 
         let (header, csum) = nom::number::complete::le_u64(&page[..])?;
@@ -168,20 +167,20 @@ impl BCacheSB {
         };
 
         if sb.version != BCACHE_SB_VERSION_CDEV_WITH_UUID && sb.version != BCACHE_SB_VERSION_BDEV {
-            return Err(BCacheError::BCacheError(
+            return Err(BCacheRecoveryError::BCacheError(
                 BCacheErrorKind::UnsupportedVersion(sb.version),
             ));
         }
 
         if sb.offset != 8 {
-            return Err(BCacheError::BCacheError(BCacheErrorKind::BadOffset(
-                sb.offset,
-            )));
+            return Err(BCacheRecoveryError::BCacheError(
+                BCacheErrorKind::BadOffset(sb.offset),
+            ));
         }
 
         sb.magic.copy_from_slice(parts.2);
         if sb.magic != BCACHE_MAGIC {
-            return Err(BCacheError::BCacheError(BCacheErrorKind::BadMagic(
+            return Err(BCacheRecoveryError::BCacheError(BCacheErrorKind::BadMagic(
                 sb.magic,
             )));
         }
@@ -190,14 +189,16 @@ impl BCacheSB {
         let crc =
             bcache_crc64(&header[0..(header_size + 8 * sb.njournal_buckets_or_keys as usize)]);
         if crc != csum {
-            return Err(BCacheError::BCacheError(BCacheErrorKind::BadChecksum(
-                csum, crc,
-            )));
+            return Err(BCacheRecoveryError::BCacheError(
+                BCacheErrorKind::BadChecksum(csum, crc),
+            ));
         }
 
         sb.uuid.copy_from_slice(parts.3);
         if sb.uuid.iter().all(|&x| x == 0) {
-            return Err(BCacheError::BCacheError(BCacheErrorKind::BadUuid(sb.uuid)));
+            return Err(BCacheRecoveryError::BCacheError(BCacheErrorKind::BadUuid(
+                sb.uuid,
+            )));
         }
 
         sb.set_uuid.copy_from_slice(parts.4);
@@ -241,7 +242,7 @@ impl BCacheCache {
             nr_in_set: parts.3,
             nr_this_dev: parts.4,
             flags: sb.flags.into(),
-            sb: sb,
+            sb,
         })
     }
 }
@@ -258,7 +259,7 @@ impl BCacheBacking {
         Ok(BCacheBacking {
             data_offset: 16,
             flags: sb.flags.into(),
-            sb: sb,
+            sb,
         })
     }
 }

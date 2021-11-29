@@ -1,5 +1,3 @@
-use bcache_recovery;
-
 fn main() {
     let mut args = std::env::args();
     args.next().expect("First argument");
