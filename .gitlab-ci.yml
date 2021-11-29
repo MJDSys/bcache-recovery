@@ -9,6 +9,7 @@ test:cargo:debug:
   script:
   - rustc --version && cargo --version
   - cargo build --verbose
+  - cargo clippy -- --deny warnings
   - cargo test --verbose
 
 test:cargo:release:
@@ -17,6 +18,7 @@ test:cargo:release:
   script:
   - rustc --version && cargo --version
   - cargo build --release --verbose
+  - cargo clippy --release -- --deny warnings
   - cargo test --release --verbose
 
 test:rustfmt:

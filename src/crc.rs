@@ -1,10 +1,9 @@
 pub fn crc64_be(mut crc: u64, input: &[u8]) -> u64 {
-    for d in input.into_iter() {
+    for d in input {
         let t = (crc >> 56) as u8 ^ d;
         crc = CRC64_TABLE[t as usize] ^ (crc << 8);
     }
-
-    return crc;
+    crc
 }
 
 const CRC64_TABLE: [u64; 256] = [
