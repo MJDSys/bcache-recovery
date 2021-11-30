@@ -1,5 +1,6 @@
 use std::fmt::{Display, Formatter};
 use std::io;
+use std::num::TryFromIntError;
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -14,6 +15,8 @@ pub enum BCacheRecoveryError {
     BCacheError(BCacheErrorKind),
     #[error("Unsupported feature {0}")]
     UnsupportedFeature(UnsupportedFeatureKind),
+    #[error("Integer conversion issue (small platform) {0}")]
+    IntegerConversionError(#[from] TryFromIntError),
 }
 
 impl From<nom::Err<nom::error::Error<&[u8]>>> for BCacheRecoveryError {
