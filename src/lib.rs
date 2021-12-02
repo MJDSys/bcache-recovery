@@ -120,6 +120,12 @@ fn get_d(input: &[u8]) -> nom::IResult<&[u8], [u64; 256]> {
     Ok((rest, buf))
 }
 
+fn get_d_8(input: &[u8]) -> nom::IResult<&[u8], [u64; 8]> {
+    let mut buf = [0; 8];
+    let (rest, _) = nom::multi::fill(nom::number::complete::le_u64, &mut buf)(input)?;
+    Ok((rest, buf))
+}
+
 impl BCacheSB {
     fn read(mut dev: impl Read) -> Result<(BCacheSB, [u8; 16])> {
         let mut page = [0u8; 4096];
@@ -212,10 +218,15 @@ impl BCacheSB {
     fn is_cache(&self) -> bool {
         self.version == BCACHE_SB_VERSION_CDEV_WITH_UUID
     }
+
+    fn jset_magic(&self) -> u64 {
+        u64::from_ne_bytes(self.set_uuid[..8].try_into().unwrap()) ^ 0x245235c1a3625032
+    }
 }
 
 #[derive(Debug)]
 pub struct BCacheCache {
+    backing_file: File,
     pub sb: BCacheSB,
     pub nbuckets: u64,
     pub block_size: u16,
@@ -223,10 +234,78 @@ pub struct BCacheCache {
     pub nr_in_set: u16,
     pub nr_this_dev: u16,
     pub flags: CacheFlags,
+    pub journal_entries: Vec<JournalSet>,
+}
+
+#[derive(Debug)]
+pub struct JournalBlock {
+    pub entries: Vec<JournalSet>,
+}
+
+#[derive(Debug)]
+pub struct JournalSet {
+    pub seq: u64,
+    pub version: u32,
+    pub keys: u32,
+    pub last_seq: u64,
+    pub uuid_bucket: [u64; 8],
+    pub btree_root: [u64; 8],
+    pub btree_level: u16,
+    pub prio_bucket: [u64; 8],
+}
+
+impl JournalSet {
+    fn read<'a>(cache: &BCacheCache, buf: &'a [u8]) -> Result<(&'a [u8], Option<Self>)> {
+        let (header, csum) = nom::number::complete::le_u64(buf)?;
+
+        let (left, parts) = nom::sequence::tuple((
+            nom::number::complete::le_u64,          // magic
+            nom::number::complete::le_u64,          // seq
+            nom::number::complete::le_u32,          // version
+            nom::number::complete::le_u32,          // keys
+            nom::number::complete::le_u64,          // last_seq
+            get_d_8,                                // uuid_bucket
+            get_d_8,                                // btree_root
+            nom::number::complete::le_u16,          // btree_level
+            nom::bytes::complete::take(3 * 2usize), // pad
+            get_d_8,                                // prio_bucket
+        ))(header)?;
+
+        if parts.0 != cache.sb.jset_magic() {
+            return Ok((&buf[0..0], None));
+        }
+
+        let header_size = left.as_ptr() as usize - header.as_ptr() as usize;
+        let jset_size = header_size + 8 * parts.3 as usize;
+        let crc = bcache_crc64(&header[0..jset_size]);
+        if crc != csum {
+            return Err(BCacheRecoveryError::BCacheError(
+                BCacheErrorKind::BadChecksum(csum, crc),
+            ));
+        }
+
+        let block_size_usize = usize::from(cache.block_size);
+        let size_with_pad: usize = (jset_size + block_size_usize - 1) & !(block_size_usize - 1);
+        let buf = &buf[size_with_pad..];
+
+        Ok((
+            buf,
+            Some(JournalSet {
+                seq: parts.1,
+                version: parts.2,
+                keys: parts.3,
+                last_seq: parts.4,
+                uuid_bucket: parts.5,
+                btree_root: parts.6,
+                btree_level: parts.7,
+                prio_bucket: parts.9,
+            }),
+        ))
+    }
 }
 
 impl BCacheCache {
-    fn new(sb: BCacheSB, sb_data: [u8; 16]) -> Result<BCacheCache> {
+    fn new(sb: BCacheSB, sb_data: [u8; 16], f: File) -> Result<BCacheCache> {
         let (_, parts) = nom::sequence::tuple((
             nom::number::complete::le_u64, // nbuckets
             nom::number::complete::le_u16, // block_size
@@ -235,15 +314,69 @@ impl BCacheCache {
             nom::number::complete::le_u16, // nr_this_dev
         ))(&sb_data[..])?;
 
-        Ok(BCacheCache {
+        let mut ret = BCacheCache {
+            backing_file: f,
             nbuckets: parts.0,
-            block_size: parts.1,
-            bucket_size: parts.2.into(),
+            block_size: parts.1 * 512,
+            bucket_size: u64::from(parts.2) * 512,
             nr_in_set: parts.3,
             nr_this_dev: parts.4,
             flags: sb.flags.into(),
+            journal_entries: vec![],
             sb,
-        })
+        };
+        if !ret.flags.sync() {
+            Err(BCacheRecoveryError::UnsupportedFeature(
+                UnsupportedFeatureKind::NonSynchronousCache,
+            ))
+        } else {
+            ret.read_journal()?;
+            Ok(ret)
+        }
+    }
+
+    fn read_journal(&mut self) -> Result<()> {
+        let journal_buckets = (0..self.sb.njournal_buckets_or_keys.into())
+            .map(|i| self.read_journal_bucket(i))
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        let max_last_seq = journal_buckets
+            .iter()
+            .flat_map(|j| j.entries.iter().map(|e| e.last_seq))
+            .max()
+            .unwrap();
+        let mut real_entries: Vec<_> = journal_buckets
+            .into_iter()
+            .flat_map(|j| j.entries)
+            .filter(|e| e.seq >= max_last_seq)
+            .collect();
+        real_entries.sort_by_key(|e| e.seq);
+        self.journal_entries = real_entries;
+        Ok(())
+    }
+
+    fn read_journal_bucket(&mut self, index: usize) -> Result<JournalBlock> {
+        let bucket_start = self.bucket_to_byte_offset(self.sb.data[index]);
+
+        let mut buf = vec![0; self.bucket_size.try_into()?];
+        self.backing_file.seek(io::SeekFrom::Start(bucket_start))?;
+        self.backing_file.read_exact(&mut buf)?;
+
+        let mut entries = vec![];
+
+        let mut to_parse = &buf[..];
+        while !to_parse.is_empty() {
+            let (left, jseto) = JournalSet::read(self, to_parse)?;
+            to_parse = left;
+            if let Some(jset) = jseto {
+                entries.push(jset);
+            }
+        }
+
+        Ok(JournalBlock { entries })
+    }
+
+    fn bucket_to_byte_offset(&self, bucket_number: u64) -> u64 {
+        bucket_number * self.bucket_size
     }
 }
 
@@ -276,7 +409,7 @@ pub fn open_device(path: &str) -> Result<BCacheDev> {
 
     let (sb, data) = BCacheSB::read(&f)?;
     Ok(if sb.is_cache() {
-        BCacheDev::Cache(BCacheCache::new(sb, data)?)
+        BCacheDev::Cache(BCacheCache::new(sb, data, f)?)
     } else {
         BCacheDev::Backing(BCacheBacking::new(sb)?)
     })

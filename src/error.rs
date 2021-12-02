@@ -1,5 +1,6 @@
 use std::fmt::{Display, Formatter};
 use std::io;
+use std::num::TryFromIntError;
 use thiserror::Error;
 
 #[derive(Debug, Error)]
@@ -12,6 +13,10 @@ pub enum BCacheRecoveryError {
     ShortRead,
     #[error("Unrecoverable BCache error {0}")]
     BCacheError(BCacheErrorKind),
+    #[error("Unsupported feature {0}")]
+    UnsupportedFeature(UnsupportedFeatureKind),
+    #[error("Integer conversion issue (small platform) {0}")]
+    IntegerConversionError(#[from] TryFromIntError),
 }
 
 impl From<nom::Err<nom::error::Error<&[u8]>>> for BCacheRecoveryError {
@@ -35,6 +40,17 @@ pub enum BCacheErrorKind {
 }
 
 impl Display for BCacheErrorKind {
+    fn fmt(&self, f: &mut Formatter) -> std::result::Result<(), std::fmt::Error> {
+        write!(f, "{:?}", self)
+    }
+}
+
+#[derive(Debug)]
+pub enum UnsupportedFeatureKind {
+    NonSynchronousCache,
+}
+
+impl Display for UnsupportedFeatureKind {
     fn fmt(&self, f: &mut Formatter) -> std::result::Result<(), std::fmt::Error> {
         write!(f, "{:?}", self)
     }
