@@ -234,7 +234,7 @@ pub struct BCacheCache {
     pub nr_in_set: u16,
     pub nr_this_dev: u16,
     pub flags: CacheFlags,
-    pub journal_buckets: Vec<JournalBlock>,
+    pub journal_entries: Vec<JournalSet>,
 }
 
 #[derive(Debug)]
@@ -322,7 +322,7 @@ impl BCacheCache {
             nr_in_set: parts.3,
             nr_this_dev: parts.4,
             flags: sb.flags.into(),
-            journal_buckets: vec![],
+            journal_entries: vec![],
             sb,
         };
         if !ret.flags.sync() {
@@ -336,10 +336,21 @@ impl BCacheCache {
     }
 
     fn read_journal(&mut self) -> Result<()> {
-        for i in 0..self.sb.njournal_buckets_or_keys {
-            let journal = self.read_journal_bucket(i.into())?;
-            self.journal_buckets.push(journal);
-        }
+        let journal_buckets = (0..self.sb.njournal_buckets_or_keys.into())
+            .map(|i| self.read_journal_bucket(i))
+            .collect::<std::result::Result<Vec<_>, _>>()?;
+        let max_last_seq = journal_buckets
+            .iter()
+            .flat_map(|j| j.entries.iter().map(|e| e.last_seq))
+            .max()
+            .unwrap();
+        let mut real_entries: Vec<_> = journal_buckets
+            .into_iter()
+            .flat_map(|j| j.entries)
+            .filter(|e| e.seq >= max_last_seq)
+            .collect();
+        real_entries.sort_by_key(|e| e.seq);
+        self.journal_entries = real_entries;
         Ok(())
     }
 
