@@ -222,6 +222,10 @@ impl BCacheSB {
     fn jset_magic(&self) -> u64 {
         u64::from_ne_bytes(self.set_uuid[..8].try_into().unwrap()) ^ 0x245235c1a3625032
     }
+
+    fn pset_magic(&self) -> u64 {
+        u64::from_ne_bytes(self.set_uuid[..8].try_into().unwrap()) ^ 0x6750e15f87337f91
+    }
 }
 
 #[derive(Debug)]
@@ -235,6 +239,13 @@ pub struct BCacheCache {
     pub nr_this_dev: u16,
     pub flags: CacheFlags,
     pub journal_entries: Vec<JournalSet>,
+    pub prio_entries: Vec<BucketPrios>,
+}
+
+#[derive(Debug)]
+pub struct BucketPrios {
+    pub prio: u16,
+    pub gen: u8,
 }
 
 #[derive(Debug)]
@@ -323,6 +334,7 @@ impl BCacheCache {
             nr_this_dev: parts.4,
             flags: sb.flags.into(),
             journal_entries: vec![],
+            prio_entries: vec![],
             sb,
         };
         if !ret.flags.sync() {
@@ -331,6 +343,9 @@ impl BCacheCache {
             ))
         } else {
             ret.read_journal()?;
+            ret.read_prios(
+                ret.journal_entries.last().unwrap().prio_bucket[ret.nr_this_dev as usize],
+            )?;
             Ok(ret)
         }
     }
@@ -373,6 +388,54 @@ impl BCacheCache {
         }
 
         Ok(JournalBlock { entries })
+    }
+
+    fn read_prios(&mut self, bucket: u64) -> Result<()> {
+        let mut buf = vec![0; self.bucket_size.try_into()?];
+        self.backing_file
+            .seek(io::SeekFrom::Start(self.bucket_to_byte_offset(bucket)))?;
+        self.backing_file.read_exact(&mut buf)?;
+
+        let (header, csum) = nom::number::complete::le_u64(&buf[..])?;
+        let calc_csum = bcache_crc64(header);
+        if calc_csum != csum {
+            return Err(BCacheRecoveryError::BCacheError(
+                BCacheErrorKind::BadChecksum(csum, calc_csum),
+            ));
+        }
+
+        let (mut rest, parts) = nom::sequence::tuple((
+            nom::number::complete::le_u64, // magic
+            nom::number::complete::le_u64, // seq
+            nom::number::complete::le_u32, // version
+            nom::number::complete::le_u32, // pad
+            nom::number::complete::le_u64, // next_bucket
+        ))(header)?;
+
+        if parts.0 != self.sb.pset_magic() {
+            return Err(BCacheRecoveryError::BCacheError(
+                BCacheErrorKind::BadSetMagic(parts.0),
+            ));
+        }
+
+        while rest.len() >= 3 && u64::try_from(self.prio_entries.len())? < self.nbuckets {
+            let (newrest, parts) = nom::sequence::tuple((
+                nom::number::complete::le_u16, // prio
+                nom::number::complete::le_u8,  // gen
+            ))(rest)?;
+            rest = newrest;
+
+            self.prio_entries.push(BucketPrios {
+                prio: parts.0,
+                gen: parts.1,
+            })
+        }
+
+        if u64::try_from(self.prio_entries.len())? < self.nbuckets {
+            self.read_prios(parts.4)
+        } else {
+            Ok(())
+        }
     }
 
     fn bucket_to_byte_offset(&self, bucket_number: u64) -> u64 {
