@@ -3,6 +3,8 @@ mod error;
 
 use crate::error::Result;
 
+use modular_bitfield::error::InvalidBitPattern;
+use modular_bitfield::error::OutOfBounds;
 use modular_bitfield::prelude::*;
 
 use std::fmt::Debug;
@@ -103,6 +105,22 @@ fn get_d_8(input: &[u8]) -> nom::IResult<&[u8], [u64; 8]> {
     let mut buf = [0; 8];
     let (rest, _) = nom::multi::fill(nom::number::complete::le_u64, &mut buf)(input)?;
     Ok((rest, buf))
+}
+
+fn get_bkey(ptrs: usize) -> impl Fn(&[u8]) -> nom::IResult<&[u8], BKey> {
+    move |input| {
+        let (rest, key) = nom::number::complete::le_u128(input)?;
+
+        let mut raw_ptrs = vec![0; ptrs];
+
+        let (rest, _) = nom::multi::fill(nom::number::complete::le_u64, &mut raw_ptrs)(rest)?;
+
+        let ret = BKey {
+            key: key.into(),
+            ptrs: raw_ptrs.into_iter().map(|rp| rp.into()).collect(),
+        };
+        Ok((rest, ret))
+    }
 }
 
 impl BCacheSB {
@@ -237,10 +255,85 @@ pub struct JournalSet {
     pub version: u32,
     pub keys: u32,
     pub last_seq: u64,
-    pub uuid_bucket: [u64; 8],
-    pub btree_root: [u64; 8],
+    pub uuid_bucket: BKey,
+    pub btree_root: BKey,
     pub btree_level: u16,
     pub prio_bucket: [u64; 8],
+}
+
+#[bitfield(bits = 128)]
+#[repr(u128)]
+#[derive(Clone, Copy, Debug)]
+pub struct BKeyKey {
+    pub inode: B20,
+    pub size: B16,
+    pub dirty: bool,
+    #[skip]
+    __: B18,
+    #[skip]
+    pad1: B1,
+    pub csum: B2,
+    #[skip]
+    pad0: B2,
+    pub ptrs: B3,
+    #[skip]
+    __: B1,
+    pub offset: u64,
+}
+
+#[derive(Debug, Clone)]
+pub struct BKey {
+    pub key: BKeyKey,
+    pub ptrs: Vec<BPtr>,
+}
+
+#[bitfield(bits = 64)]
+#[repr(u64)]
+#[derive(Clone, Copy, Debug)]
+pub struct BPtr {
+    pub gen: u8,
+    pub offset: Sector43,
+    pub dev: B12,
+    #[skip]
+    __: B1,
+}
+
+#[derive(Debug)]
+pub struct Sector(u64);
+
+pub enum Sector43 {}
+
+impl Sector {
+    pub fn as_bytes(&self) -> u64 {
+        self.0 * 512
+    }
+}
+
+impl modular_bitfield::Specifier for Sector43 {
+    const BITS: usize = 43;
+
+    type Bytes = u64;
+    type InOut = Sector;
+
+    #[inline]
+    fn into_bytes(input: Self::InOut) -> std::result::Result<Self::Bytes, OutOfBounds> {
+        if input.0 > 1 << Self::BITS {
+            return Err(OutOfBounds);
+        }
+        Ok(input.0)
+    }
+
+    #[inline]
+    fn from_bytes(
+        bytes: Self::Bytes,
+    ) -> std::result::Result<Self::InOut, InvalidBitPattern<Self::Bytes>> {
+        if bytes > 1 << Self::BITS {
+            return Err(InvalidBitPattern {
+                invalid_bytes: bytes,
+            });
+        }
+        Ok(Sector(bytes))
+    }
 }
 
 impl JournalSet {
@@ -253,8 +346,8 @@ impl JournalSet {
             nom::number::complete::le_u32,          // version
             nom::number::complete::le_u32,          // keys
             nom::number::complete::le_u64,          // last_seq
-            get_d_8,                                // uuid_bucket
-            get_d_8,                                // btree_root
+            get_bkey(6),                            // uuid_bucket
+            get_bkey(6),                            // btree_root
             nom::number::complete::le_u16,          // btree_level
             nom::bytes::complete::take(3 * 2usize), // pad
             get_d_8,                                // prio_bucket
