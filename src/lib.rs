@@ -5,7 +5,7 @@ use crate::error::Result;
 
 use modular_bitfield::prelude::*;
 
-use std::fmt::{Debug, Formatter};
+use std::fmt::Debug;
 use std::fs::File;
 use std::io;
 use std::io::prelude::*;
@@ -35,24 +35,13 @@ pub enum CacheReplacement {
 
 #[bitfield(bits = 64)]
 #[repr(u64)]
+#[derive(Debug)]
 pub struct CacheFlags {
     pub sync: bool,
     pub discard: bool,
     pub replacement: CacheReplacement,
     #[skip]
     __: B60,
-}
-
-impl Debug for CacheFlags {
-    fn fmt(&self, f: &mut Formatter) -> std::result::Result<(), std::fmt::Error> {
-        write!(
-            f,
-            "CacheFlags {{ sync: {:?}, discard: {:?}, replacement: {:?} }}",
-            self.sync(),
-            self.discard(),
-            self.replacement()
-        )
-    }
 }
 
 #[derive(BitfieldSpecifier, Debug)]
@@ -75,24 +64,14 @@ pub enum BackingState {
 
 #[bitfield(bits = 64)]
 #[repr(u64)]
+#[derive(Debug)]
 pub struct BackingFlags {
     pub mode: CacheMode,
     #[skip]
     __: B57,
-    state: BackingState,
+    pub state: BackingState,
     #[skip]
     ___: B1,
-}
-
-impl Debug for BackingFlags {
-    fn fmt(&self, f: &mut Formatter) -> std::result::Result<(), std::fmt::Error> {
-        write!(
-            f,
-            "BackingFlags {{ mode: {:?}, state: {:?} }}",
-            self.mode(),
-            self.state()
-        )
-    }
 }
 
 #[derive(Debug)]
