@@ -19,6 +19,8 @@ const BCACHE_SB_VERSION_CDEV_WITH_UUID: u64 = 3;
 const _BCACHE_SB_VERSION_CDEV_WITH_FEATURES: u64 = 5;
 const _BCACHE_SB_VERSION_BDEV_WITH_FEATURES: u64 = 6;
 
+const MAX_CACHES_PER_SET: u16 = 8;
+
 const BCACHE_MAGIC: [u8; 16] = [
     0xc6, 0x85, 0x73, 0xf6, 0x4e, 0x1a, 0x45, 0xca, 0x82, 0x65, 0xf5, 0x7f, 0x48, 0xba, 0x6d, 0x81,
 ];
@@ -298,6 +300,20 @@ pub struct BPtr {
     __: B1,
 }
 
+impl BPtr {
+    pub fn is_available(&self, _ca: &BCacheCache) -> bool {
+        self.dev() < MAX_CACHES_PER_SET
+    }
+
+    pub fn bucket_remainder(&self, ca: &BCacheCache) -> u64 {
+        self.offset().as_bytes() & (ca.bucket_size - 1)
+    }
+
+    pub fn bucket_number(&self, ca: &BCacheCache) -> u64 {
+        self.offset().as_bytes() / ca.bucket_size
+    }
+}
+
 #[derive(Debug)]
 pub struct Sector(u64);
 
@@ -333,6 +349,33 @@ impl modular_bitfield::Specifier for Sector43 {
             });
         }
         Ok(Sector(bytes))
+    }
+}
+
+impl BKey {
+    fn btree_ptr_invalid(&self, ca: &BCacheCache) -> bool {
+        if self.key.ptrs() == 0 || self.key.size() == 0 || self.key.dirty() {
+            return false;
+        }
+
+        self.ptr_invalid(ca)
+    }
+
+    fn ptr_invalid(&self, ca: &BCacheCache) -> bool {
+        for p in self.ptrs.iter() {
+            if p.is_available(ca) {
+                let other = p.bucket_remainder(ca);
+                let bucket_number = p.bucket_number(ca);
+
+                if u64::from(self.key.size()) + other > ca.bucket_size
+                    || bucket_number < ca.sb.first_bucket.into()
+                    || bucket_number >= ca.nbuckets
+                {
+                    return true;
+                }
+            }
+        }
+        false
     }
 }
 
@@ -416,6 +459,13 @@ impl BCacheCache {
             let journal_entry = journal_entries.last().unwrap();
 
             ret.read_prios(journal_entry.prio_bucket[ret.nr_this_dev as usize])?;
+
+            if journal_entry.btree_root.btree_ptr_invalid(&ret) {
+                return Err(BCacheRecoveryError::BCacheError(
+                    BCacheErrorKind::BadBtreeKey(journal_entry.btree_root.clone()),
+                ));
+            }
+
             Ok(ret)
         }
     }

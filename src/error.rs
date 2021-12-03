@@ -38,6 +38,7 @@ pub enum BCacheErrorKind {
     BadSetMagic(u64),
     BadChecksum(u64, u64),
     BadUuid([u8; 16]),
+    BadBtreeKey(crate::BKey),
 }
 
 impl Display for BCacheErrorKind {
