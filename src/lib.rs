@@ -217,7 +217,6 @@ pub struct BCacheCache {
     pub nr_in_set: u16,
     pub nr_this_dev: u16,
     pub flags: CacheFlags,
-    pub journal_entries: Vec<JournalSet>,
     pub prio_entries: Vec<BucketPrios>,
 }
 
@@ -312,7 +311,6 @@ impl BCacheCache {
             nr_in_set: parts.3,
             nr_this_dev: parts.4,
             flags: sb.flags.into(),
-            journal_entries: vec![],
             prio_entries: vec![],
             sb,
         };
@@ -321,15 +319,15 @@ impl BCacheCache {
                 UnsupportedFeatureKind::NonSynchronousCache,
             ))
         } else {
-            ret.read_journal()?;
-            ret.read_prios(
-                ret.journal_entries.last().unwrap().prio_bucket[ret.nr_this_dev as usize],
-            )?;
+            let journal_entries = ret.read_journal()?;
+            let journal_entry = journal_entries.last().unwrap();
+
+            ret.read_prios(journal_entry.prio_bucket[ret.nr_this_dev as usize])?;
             Ok(ret)
         }
     }
 
-    fn read_journal(&mut self) -> Result<()> {
+    fn read_journal(&mut self) -> Result<Vec<JournalSet>> {
         let journal_buckets = (0..self.sb.njournal_buckets_or_keys.into())
             .map(|i| self.read_journal_bucket(i))
             .collect::<std::result::Result<Vec<_>, _>>()?;
@@ -344,8 +342,7 @@ impl BCacheCache {
             .filter(|e| e.seq >= max_last_seq)
             .collect();
         real_entries.sort_by_key(|e| e.seq);
-        self.journal_entries = real_entries;
-        Ok(())
+        Ok(real_entries)
     }
 
     fn read_journal_bucket(&mut self, index: usize) -> Result<JournalBlock> {
