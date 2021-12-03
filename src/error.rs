@@ -35,6 +35,7 @@ pub enum BCacheErrorKind {
     UnsupportedVersion(u64),
     BadOffset(u64),
     BadMagic([u8; 16]),
+    BadSetMagic(u64),
     BadChecksum(u64, u64),
     BadUuid([u8; 16]),
 }
