@@ -295,7 +295,7 @@ pub struct JournalBlock {
 pub struct JournalSet {
     pub seq: u64,
     pub version: u32,
-    pub keys: u32,
+    pub keys: Vec<BKey>,
     pub last_seq: u64,
     pub uuid_bucket: BKey,
     pub btree_root: BKey,
@@ -643,6 +643,14 @@ impl JournalSet {
             ));
         }
 
+        let mut keys = vec![];
+        let mut left = &left[..8usize * usize::try_from(parts.3)?];
+        while !left.is_empty() {
+            let (lefta, bkey) = get_bkey(None)(left)?;
+            keys.push(bkey);
+            left = lefta;
+        }
+
         let block_size_usize = usize::from(cache.block_size);
         let size_with_pad: usize = (jset_size + block_size_usize - 1) & !(block_size_usize - 1);
         let buf = &buf[size_with_pad..];
@@ -652,12 +660,12 @@ impl JournalSet {
             Some(JournalSet {
                 seq: parts.1,
                 version: parts.2,
-                keys: parts.3,
                 last_seq: parts.4,
                 uuid_bucket: parts.5,
                 btree_root: parts.6,
                 btree_level: parts.7,
                 prio_bucket: parts.9,
+                keys,
             }),
         ))
     }
