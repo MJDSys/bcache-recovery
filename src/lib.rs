@@ -13,6 +13,7 @@ use std::fmt::Debug;
 use std::fs::File;
 use std::io;
 use std::io::prelude::*;
+use std::rc::Rc;
 
 use error::*;
 
@@ -246,6 +247,10 @@ impl BCacheSB {
     fn pset_magic(&self) -> u64 {
         u64::from_ne_bytes(self.set_uuid[..8].try_into().unwrap()) ^ 0x6750e15f87337f91
     }
+
+    fn bset_magic(&self) -> u64 {
+        u64::from_ne_bytes(self.set_uuid[..8].try_into().unwrap()) ^ 0x90135c78b99e07f5
+    }
 }
 
 #[derive(Debug)]
@@ -259,6 +264,7 @@ pub struct BCacheCache {
     pub nr_this_dev: u16,
     pub flags: CacheFlags,
     pub prio_entries: Vec<BucketPrios>,
+    pub root: Option<Rc<BTree>>,
 }
 
 #[derive(Debug)]
@@ -319,6 +325,107 @@ pub struct BPtr {
     pub dev: B12,
     #[skip]
     __: B1,
+}
+
+#[derive(Debug)]
+pub struct BTree {
+    pub seq: u64,
+    pub parent: Option<Rc<BTree>>,
+    pub flags: u32,
+    pub level: u8,
+    pub key: BKey,
+    pub keys: Vec<BKey>,
+}
+
+impl BTree {
+    pub fn new(bkey: &BKey, seq: u64, level: u8, keys: Vec<BKey>) -> Rc<Self> {
+        Rc::new(Self {
+            seq,
+            parent: None,
+            flags: 0,
+            level,
+            keys,
+            key: bkey.clone(),
+        })
+    }
+
+    pub fn read(ca: &mut BCacheCache, bkey: &BKey, level: u8) -> Result<Rc<Self>> {
+        let mut buf = vec![0u8; bkey.key.size().as_bytes().try_into()?];
+        ca.backing_file
+            .seek(io::SeekFrom::Start(bkey.ptrs[0].offset().as_bytes()))?;
+        ca.backing_file.read_exact(&mut buf)?;
+        let mut buf = &buf[..];
+        let mut seq = None;
+        let mut keys = vec![];
+
+        while !buf.is_empty() {
+            let (header, csum) = nom::number::complete::le_u64(buf)?;
+            let (rest, parts) = nom::sequence::tuple((
+                nom::number::complete::le_u64, // magic
+                nom::number::complete::le_u64, // seq
+                nom::number::complete::le_u32, // version
+                nom::number::complete::le_u32, // keys
+            ))(header)?;
+
+            if let Some(x) = seq {
+                if x != parts.1 {
+                    break;
+                }
+            } else {
+                seq = Some(parts.1)
+            }
+
+            if parts.2 != 1 {
+                return Err(BCacheRecoveryError::BCacheError(
+                    BCacheErrorKind::UnsupportedVersion(parts.2.into()),
+                ));
+            }
+
+            if parts.0 != ca.sb.bset_magic() {
+                return Err(BCacheRecoveryError::BCacheError(
+                    BCacheErrorKind::BadSetMagic(parts.0),
+                ));
+            }
+
+            let crc = bcache_crc64_start(
+                (bkey.ptrs[0]).try_into().unwrap(),
+                &header[0..(24 + parts.3 * 8).try_into()?],
+            );
+            if crc != csum {
+                return Err(BCacheRecoveryError::BCacheError(
+                    BCacheErrorKind::BadChecksum(csum, crc),
+                ));
+            }
+
+            let mut rest = &rest[..(parts.3 * 8).try_into()?];
+            while !rest.is_empty() {
+                let (resta, key) = get_bkey(None)(rest)?;
+                keys.push(key);
+
+                rest = resta;
+            }
+
+            let offset = rest.as_ptr() as usize - buf.as_ptr() as usize;
+            let offset = (offset + 4095) & !4095;
+            buf = &buf[offset..];
+        }
+
+        while !buf.is_empty() {
+            let (_, tseq) = nom::number::complete::le_u64(&buf[16..])?;
+            if let Some(seq) = seq {
+                if seq == tseq {
+                    println!("{} {:?}", tseq, seq);
+                    return Err(BCacheRecoveryError::BCacheError(BCacheErrorKind::BadBtree(
+                        bkey.clone(),
+                    )));
+                }
+            }
+            buf = &buf[4096..];
+        }
+
+        keys.sort_by_key(|v| v.key.offset());
+        Ok(Self::new(bkey, seq.unwrap(), level, keys))
+    }
 }
 
 impl BPtr {
@@ -497,6 +604,7 @@ impl BCacheCache {
             nr_this_dev: parts.4,
             flags: sb.flags.into(),
             prio_entries: vec![],
+            root: None,
             sb,
         };
         if !ret.flags.sync() {
@@ -514,6 +622,12 @@ impl BCacheCache {
                     BCacheErrorKind::BadBtreeKey(journal_entry.btree_root.clone()),
                 ));
             }
+
+            ret.root = Some(BTree::read(
+                &mut ret,
+                &journal_entry.btree_root,
+                journal_entry.btree_level.try_into()?,
+            )?);
 
             Ok(ret)
         }
