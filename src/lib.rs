@@ -3,12 +3,17 @@ mod error;
 
 use crate::error::Result;
 
+use modular_bitfield::error::InvalidBitPattern;
+use modular_bitfield::error::OutOfBounds;
 use modular_bitfield::prelude::*;
+use nom::error::{ErrorKind, ParseError};
+use nom::Err;
 
 use std::fmt::Debug;
 use std::fs::File;
 use std::io;
 use std::io::prelude::*;
+use std::rc::Rc;
 
 use error::*;
 
@@ -17,12 +22,18 @@ const BCACHE_SB_VERSION_CDEV_WITH_UUID: u64 = 3;
 const _BCACHE_SB_VERSION_CDEV_WITH_FEATURES: u64 = 5;
 const _BCACHE_SB_VERSION_BDEV_WITH_FEATURES: u64 = 6;
 
+const MAX_CACHES_PER_SET: u16 = 8;
+
 const BCACHE_MAGIC: [u8; 16] = [
     0xc6, 0x85, 0x73, 0xf6, 0x4e, 0x1a, 0x45, 0xca, 0x82, 0x65, 0xf5, 0x7f, 0x48, 0xba, 0x6d, 0x81,
 ];
 
 fn bcache_crc64(input: &[u8]) -> u64 {
-    crc::crc64_be(u64::MAX, input) ^ u64::MAX
+    bcache_crc64_start(u64::MAX, input)
+}
+
+fn bcache_crc64_start(start: u64, input: &[u8]) -> u64 {
+    crc::crc64_be(start, input) ^ u64::MAX
 }
 
 #[derive(BitfieldSpecifier, Debug)]
@@ -103,6 +114,37 @@ fn get_d_8(input: &[u8]) -> nom::IResult<&[u8], [u64; 8]> {
     let mut buf = [0; 8];
     let (rest, _) = nom::multi::fill(nom::number::complete::le_u64, &mut buf)(input)?;
     Ok((rest, buf))
+}
+
+fn get_bkey(ptrs: Option<usize>) -> impl Fn(&[u8]) -> nom::IResult<&[u8], BKey> {
+    move |input| {
+        let (rest, key) = nom::number::complete::u128(nom::number::Endianness::Native)(input)?;
+        let key = BKeyKey::from(key);
+
+        let mut raw_ptrs = vec![0; key.ptrs().into()];
+
+        let (mut rest, _) = nom::multi::fill(nom::number::complete::le_u64, &mut raw_ptrs)(rest)?;
+        if let Some(ptrs) = ptrs {
+            rest = match ptrs.checked_sub(raw_ptrs.len()) {
+                Some(x) => {
+                    let (rest, _) = nom::bytes::complete::take(x * 8)(rest)?;
+                    rest
+                }
+                None => {
+                    return Err(Err::Failure(ParseError::from_error_kind(
+                        rest,
+                        ErrorKind::Count,
+                    )))
+                }
+            }
+        }
+
+        let ret = BKey {
+            key,
+            ptrs: raw_ptrs.into_iter().map(|rp| rp.into()).collect(),
+        };
+        Ok((rest, ret))
+    }
 }
 
 impl BCacheSB {
@@ -205,6 +247,10 @@ impl BCacheSB {
     fn pset_magic(&self) -> u64 {
         u64::from_ne_bytes(self.set_uuid[..8].try_into().unwrap()) ^ 0x6750e15f87337f91
     }
+
+    fn bset_magic(&self) -> u64 {
+        u64::from_ne_bytes(self.set_uuid[..8].try_into().unwrap()) ^ 0x90135c78b99e07f5
+    }
 }
 
 #[derive(Debug)]
@@ -217,8 +263,8 @@ pub struct BCacheCache {
     pub nr_in_set: u16,
     pub nr_this_dev: u16,
     pub flags: CacheFlags,
-    pub journal_entries: Vec<JournalSet>,
     pub prio_entries: Vec<BucketPrios>,
+    pub root: Option<Rc<BTree>>,
 }
 
 #[derive(Debug)]
@@ -238,10 +284,255 @@ pub struct JournalSet {
     pub version: u32,
     pub keys: u32,
     pub last_seq: u64,
-    pub uuid_bucket: [u64; 8],
-    pub btree_root: [u64; 8],
+    pub uuid_bucket: BKey,
+    pub btree_root: BKey,
     pub btree_level: u16,
     pub prio_bucket: [u64; 8],
+}
+
+#[bitfield(bits = 128)]
+#[repr(u128)]
+#[derive(Clone, Copy, Debug)]
+pub struct BKeyKey {
+    pub inode: B20,
+    pub size: Sector16,
+    pub dirty: bool,
+    #[skip]
+    __: B18,
+    #[skip]
+    pad1: B1,
+    pub csum: B2,
+    #[skip]
+    pad0: B2,
+    pub ptrs: B3,
+    #[skip]
+    __: B1,
+    pub offset: u64,
+}
+
+#[derive(Debug, Clone)]
+pub struct BKey {
+    pub key: BKeyKey,
+    pub ptrs: Vec<BPtr>,
+}
+
+#[bitfield(bits = 64)]
+#[repr(u64)]
+#[derive(Clone, Copy, Debug)]
+pub struct BPtr {
+    pub gen: u8,
+    pub offset: Sector43,
+    pub dev: B12,
+    #[skip]
+    __: B1,
+}
+
+#[derive(Debug)]
+pub struct BTree {
+    pub seq: u64,
+    pub parent: Option<Rc<BTree>>,
+    pub flags: u32,
+    pub level: u8,
+    pub key: BKey,
+    pub keys: Vec<BKey>,
+}
+
+impl BTree {
+    pub fn new(bkey: &BKey, seq: u64, level: u8, keys: Vec<BKey>) -> Rc<Self> {
+        Rc::new(Self {
+            seq,
+            parent: None,
+            flags: 0,
+            level,
+            keys,
+            key: bkey.clone(),
+        })
+    }
+
+    pub fn read(ca: &mut BCacheCache, bkey: &BKey, level: u8) -> Result<Rc<Self>> {
+        let mut buf = vec![0u8; bkey.key.size().as_bytes().try_into()?];
+        ca.backing_file
+            .seek(io::SeekFrom::Start(bkey.ptrs[0].offset().as_bytes()))?;
+        ca.backing_file.read_exact(&mut buf)?;
+        let mut buf = &buf[..];
+        let mut seq = None;
+        let mut keys = vec![];
+
+        while !buf.is_empty() {
+            let (header, csum) = nom::number::complete::le_u64(buf)?;
+            let (rest, parts) = nom::sequence::tuple((
+                nom::number::complete::le_u64, // magic
+                nom::number::complete::le_u64, // seq
+                nom::number::complete::le_u32, // version
+                nom::number::complete::le_u32, // keys
+            ))(header)?;
+
+            if let Some(x) = seq {
+                if x != parts.1 {
+                    break;
+                }
+            } else {
+                seq = Some(parts.1)
+            }
+
+            if parts.2 != 1 {
+                return Err(BCacheRecoveryError::BCacheError(
+                    BCacheErrorKind::UnsupportedVersion(parts.2.into()),
+                ));
+            }
+
+            if parts.0 != ca.sb.bset_magic() {
+                return Err(BCacheRecoveryError::BCacheError(
+                    BCacheErrorKind::BadSetMagic(parts.0),
+                ));
+            }
+
+            let crc = bcache_crc64_start(
+                (bkey.ptrs[0]).try_into().unwrap(),
+                &header[0..(24 + parts.3 * 8).try_into()?],
+            );
+            if crc != csum {
+                return Err(BCacheRecoveryError::BCacheError(
+                    BCacheErrorKind::BadChecksum(csum, crc),
+                ));
+            }
+
+            let mut rest = &rest[..(parts.3 * 8).try_into()?];
+            while !rest.is_empty() {
+                let (resta, key) = get_bkey(None)(rest)?;
+                keys.push(key);
+
+                rest = resta;
+            }
+
+            let offset = rest.as_ptr() as usize - buf.as_ptr() as usize;
+            let offset = (offset + 4095) & !4095;
+            buf = &buf[offset..];
+        }
+
+        while !buf.is_empty() {
+            let (_, tseq) = nom::number::complete::le_u64(&buf[16..])?;
+            if let Some(seq) = seq {
+                if seq == tseq {
+                    println!("{} {:?}", tseq, seq);
+                    return Err(BCacheRecoveryError::BCacheError(BCacheErrorKind::BadBtree(
+                        bkey.clone(),
+                    )));
+                }
+            }
+            buf = &buf[4096..];
+        }
+
+        keys.sort_by_key(|v| v.key.offset());
+        Ok(Self::new(bkey, seq.unwrap(), level, keys))
+    }
+}
+
+impl BPtr {
+    pub fn is_available(&self, _ca: &BCacheCache) -> bool {
+        self.dev() < MAX_CACHES_PER_SET
+    }
+
+    pub fn bucket_remainder(&self, ca: &BCacheCache) -> u64 {
+        self.offset().as_bytes() & (ca.bucket_size - 1)
+    }
+
+    pub fn bucket_number(&self, ca: &BCacheCache) -> u64 {
+        self.offset().as_bytes() / ca.bucket_size
+    }
+}
+
+#[derive(Debug)]
+pub struct Sector(u64);
+
+pub enum Sector43 {}
+pub enum Sector16 {}
+
+impl Sector {
+    pub fn as_bytes(&self) -> u64 {
+        self.0 * 512
+    }
+}
+
+impl modular_bitfield::Specifier for Sector43 {
+    const BITS: usize = 43;
+
+    type Bytes = u64;
+    type InOut = Sector;
+
+    #[inline]
+    fn into_bytes(input: Self::InOut) -> std::result::Result<Self::Bytes, OutOfBounds> {
+        if input.0 > 1 << Self::BITS {
+            return Err(OutOfBounds);
+        }
+        Ok(input.0)
+    }
+
+    #[inline]
+    fn from_bytes(
+        bytes: Self::Bytes,
+    ) -> std::result::Result<Self::InOut, InvalidBitPattern<Self::Bytes>> {
+        if bytes > 1 << Self::BITS {
+            return Err(InvalidBitPattern {
+                invalid_bytes: bytes,
+            });
+        }
+        Ok(Sector(bytes))
+    }
+}
+
+impl modular_bitfield::Specifier for Sector16 {
+    const BITS: usize = 16;
+
+    type Bytes = u64;
+    type InOut = Sector;
+
+    #[inline]
+    fn into_bytes(input: Self::InOut) -> std::result::Result<Self::Bytes, OutOfBounds> {
+        if input.0 > 1 << Self::BITS {
+            return Err(OutOfBounds);
+        }
+        Ok(input.0)
+    }
+
+    #[inline]
+    fn from_bytes(
+        bytes: Self::Bytes,
+    ) -> std::result::Result<Self::InOut, InvalidBitPattern<Self::Bytes>> {
+        if bytes > 1 << Self::BITS {
+            return Err(InvalidBitPattern {
+                invalid_bytes: bytes,
+            });
+        }
+        Ok(Sector(bytes))
+    }
+}
+
+impl BKey {
+    fn btree_ptr_invalid(&self, ca: &BCacheCache) -> bool {
+        if self.key.ptrs() == 0 || self.key.size().0 == 0 || self.key.dirty() {
+            return false;
+        }
+
+        self.ptr_invalid(ca)
+    }
+
+    fn ptr_invalid(&self, ca: &BCacheCache) -> bool {
+        for p in self.ptrs.iter() {
+            if p.is_available(ca) {
+                let other = p.bucket_remainder(ca);
+                let bucket_number = p.bucket_number(ca);
+
+                if self.key.size().as_bytes() + other > ca.bucket_size
+                    || bucket_number < ca.sb.first_bucket.into()
+                    || bucket_number >= ca.nbuckets
+                {
+                    return true;
+                }
+            }
+        }
+        false
+    }
 }
 
 impl JournalSet {
@@ -254,8 +545,8 @@ impl JournalSet {
             nom::number::complete::le_u32,          // version
             nom::number::complete::le_u32,          // keys
             nom::number::complete::le_u64,          // last_seq
-            get_d_8,                                // uuid_bucket
-            get_d_8,                                // btree_root
+            get_bkey(Some(6)),                      // uuid_bucket
+            get_bkey(Some(6)),                      // btree_root
             nom::number::complete::le_u16,          // btree_level
             nom::bytes::complete::take(3 * 2usize), // pad
             get_d_8,                                // prio_bucket
@@ -312,8 +603,8 @@ impl BCacheCache {
             nr_in_set: parts.3,
             nr_this_dev: parts.4,
             flags: sb.flags.into(),
-            journal_entries: vec![],
             prio_entries: vec![],
+            root: None,
             sb,
         };
         if !ret.flags.sync() {
@@ -321,15 +612,28 @@ impl BCacheCache {
                 UnsupportedFeatureKind::NonSynchronousCache,
             ))
         } else {
-            ret.read_journal()?;
-            ret.read_prios(
-                ret.journal_entries.last().unwrap().prio_bucket[ret.nr_this_dev as usize],
-            )?;
+            let journal_entries = ret.read_journal()?;
+            let journal_entry = journal_entries.last().unwrap();
+
+            ret.read_prios(journal_entry.prio_bucket[ret.nr_this_dev as usize])?;
+
+            if journal_entry.btree_root.btree_ptr_invalid(&ret) {
+                return Err(BCacheRecoveryError::BCacheError(
+                    BCacheErrorKind::BadBtreeKey(journal_entry.btree_root.clone()),
+                ));
+            }
+
+            ret.root = Some(BTree::read(
+                &mut ret,
+                &journal_entry.btree_root,
+                journal_entry.btree_level.try_into()?,
+            )?);
+
             Ok(ret)
         }
     }
 
-    fn read_journal(&mut self) -> Result<()> {
+    fn read_journal(&mut self) -> Result<Vec<JournalSet>> {
         let journal_buckets = (0..self.sb.njournal_buckets_or_keys.into())
             .map(|i| self.read_journal_bucket(i))
             .collect::<std::result::Result<Vec<_>, _>>()?;
@@ -344,8 +648,7 @@ impl BCacheCache {
             .filter(|e| e.seq >= max_last_seq)
             .collect();
         real_entries.sort_by_key(|e| e.seq);
-        self.journal_entries = real_entries;
-        Ok(())
+        Ok(real_entries)
     }
 
     fn read_journal_bucket(&mut self, index: usize) -> Result<JournalBlock> {
