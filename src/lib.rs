@@ -6,6 +6,8 @@ use crate::error::Result;
 use modular_bitfield::error::InvalidBitPattern;
 use modular_bitfield::error::OutOfBounds;
 use modular_bitfield::prelude::*;
+use nom::error::{ErrorKind, ParseError};
+use nom::Err;
 
 use std::fmt::Debug;
 use std::fs::File;
@@ -109,16 +111,31 @@ fn get_d_8(input: &[u8]) -> nom::IResult<&[u8], [u64; 8]> {
     Ok((rest, buf))
 }
 
-fn get_bkey(ptrs: usize) -> impl Fn(&[u8]) -> nom::IResult<&[u8], BKey> {
+fn get_bkey(ptrs: Option<usize>) -> impl Fn(&[u8]) -> nom::IResult<&[u8], BKey> {
     move |input| {
-        let (rest, key) = nom::number::complete::le_u128(input)?;
+        let (rest, key) = nom::number::complete::u128(nom::number::Endianness::Native)(input)?;
+        let key = BKeyKey::from(key);
 
-        let mut raw_ptrs = vec![0; ptrs];
+        let mut raw_ptrs = vec![0; key.ptrs().into()];
 
-        let (rest, _) = nom::multi::fill(nom::number::complete::le_u64, &mut raw_ptrs)(rest)?;
+        let (mut rest, _) = nom::multi::fill(nom::number::complete::le_u64, &mut raw_ptrs)(rest)?;
+        if let Some(ptrs) = ptrs {
+            rest = match ptrs.checked_sub(raw_ptrs.len()) {
+                Some(x) => {
+                    let (rest, _) = nom::bytes::complete::take(x * 8)(rest)?;
+                    rest
+                }
+                None => {
+                    return Err(Err::Failure(ParseError::from_error_kind(
+                        rest,
+                        ErrorKind::Count,
+                    )))
+                }
+            }
+        }
 
         let ret = BKey {
-            key: key.into(),
+            key,
             ptrs: raw_ptrs.into_iter().map(|rp| rp.into()).collect(),
         };
         Ok((rest, ret))
@@ -389,8 +406,8 @@ impl JournalSet {
             nom::number::complete::le_u32,          // version
             nom::number::complete::le_u32,          // keys
             nom::number::complete::le_u64,          // last_seq
-            get_bkey(6),                            // uuid_bucket
-            get_bkey(6),                            // btree_root
+            get_bkey(Some(6)),                      // uuid_bucket
+            get_bkey(Some(6)),                      // btree_root
             nom::number::complete::le_u16,          // btree_level
             nom::bytes::complete::take(3 * 2usize), // pad
             get_d_8,                                // prio_bucket
