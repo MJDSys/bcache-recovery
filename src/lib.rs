@@ -116,6 +116,18 @@ fn get_d_8(input: &[u8]) -> nom::IResult<&[u8], [u64; 8]> {
     Ok((rest, buf))
 }
 
+fn get_d8_16(input: &[u8]) -> nom::IResult<&[u8], [u8; 16]> {
+    let mut buf = [0; 16];
+    let (rest, _) = nom::multi::fill(nom::number::complete::le_u8, &mut buf)(input)?;
+    Ok((rest, buf))
+}
+
+fn get_d8_32(input: &[u8]) -> nom::IResult<&[u8], [u8; 32]> {
+    let mut buf = [0; 32];
+    let (rest, _) = nom::multi::fill(nom::number::complete::le_u8, &mut buf)(input)?;
+    Ok((rest, buf))
+}
+
 fn get_bkey(ptrs: Option<usize>) -> impl Fn(&[u8]) -> nom::IResult<&[u8], BKey> {
     move |input| {
         let (rest, key) = nom::number::complete::u128(nom::number::Endianness::Native)(input)?;
@@ -265,6 +277,7 @@ pub struct BCacheCache {
     pub flags: CacheFlags,
     pub prio_entries: Vec<BucketPrios>,
     pub root: Option<Rc<BTree>>,
+    pub uuids: Option<Vec<Uuid>>,
 }
 
 #[derive(Debug)]
@@ -425,6 +438,71 @@ impl BTree {
 
         keys.sort_by_key(|v| v.key.offset());
         Ok(Self::new(bkey, seq.unwrap(), level, keys))
+    }
+}
+
+#[derive(Debug)]
+pub struct Uuid {
+    pub uuid: [u8; 16],
+    pub label: [u8; 32],
+    pub first_reg: u32,
+    pub last_reg: u32,
+    pub invalidated: u32,
+    pub flags: UuidFlags,
+    pub sectors: u64,
+}
+
+#[bitfield(bits = 32)]
+#[repr(u32)]
+#[derive(Debug)]
+pub struct UuidFlags {
+    pub flash_only: bool,
+    #[skip]
+    __: B31,
+}
+
+impl Uuid {
+    pub fn read(ca: &mut BCacheCache, journal_entry: &JournalSet) -> Result<Vec<Uuid>> {
+        let bkey = &journal_entry.uuid_bucket;
+        println!("{:?}", bkey);
+        if journal_entry.version != 1 {
+            return Err(BCacheRecoveryError::BCacheError(
+                BCacheErrorKind::UnsupportedVersion(journal_entry.version.into()),
+            ));
+        }
+
+        let mut ret = vec![];
+
+        let mut buf = vec![0; bkey.key.size().as_bytes().try_into()?];
+
+        for p in bkey.ptrs.iter() {
+            ca.backing_file
+                .seek(io::SeekFrom::Start(p.offset().as_bytes()))?;
+            ca.backing_file.read_exact(&mut buf)?;
+            let buf = buf.as_ref();
+
+            let (_, parts) = nom::sequence::tuple((
+                get_d8_16,                     // uuid
+                get_d8_32,                     // label
+                nom::number::complete::le_u32, // first_reg
+                nom::number::complete::le_u32, // last_reg
+                nom::number::complete::le_u32, // invalidated
+                nom::number::complete::le_u32, // flags
+                nom::number::complete::le_u64, // sectors
+            ))(buf)?;
+
+            ret.push(Uuid {
+                uuid: parts.0,
+                label: parts.1,
+                first_reg: parts.2,
+                last_reg: parts.3,
+                invalidated: parts.4,
+                flags: parts.5.into(),
+                sectors: parts.6,
+            });
+        }
+
+        Ok(ret)
     }
 }
 
@@ -605,6 +683,7 @@ impl BCacheCache {
             flags: sb.flags.into(),
             prio_entries: vec![],
             root: None,
+            uuids: None,
             sb,
         };
         if !ret.flags.sync() {
@@ -628,6 +707,8 @@ impl BCacheCache {
                 &journal_entry.btree_root,
                 journal_entry.btree_level.try_into()?,
             )?);
+
+            ret.uuids = Some(Uuid::read(&mut ret, journal_entry)?);
 
             Ok(ret)
         }
