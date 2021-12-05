@@ -28,7 +28,11 @@ const BCACHE_MAGIC: [u8; 16] = [
 ];
 
 fn bcache_crc64(input: &[u8]) -> u64 {
-    crc::crc64_be(u64::MAX, input) ^ u64::MAX
+    bcache_crc64_start(u64::MAX, input)
+}
+
+fn bcache_crc64_start(start: u64, input: &[u8]) -> u64 {
+    crc::crc64_be(start, input) ^ u64::MAX
 }
 
 #[derive(BitfieldSpecifier, Debug)]
