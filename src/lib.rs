@@ -289,7 +289,7 @@ pub struct JournalSet {
 #[derive(Clone, Copy, Debug)]
 pub struct BKeyKey {
     pub inode: B20,
-    pub size: B16,
+    pub size: Sector16,
     pub dirty: bool,
     #[skip]
     __: B18,
@@ -339,6 +339,7 @@ impl BPtr {
 pub struct Sector(u64);
 
 pub enum Sector43 {}
+pub enum Sector16 {}
 
 impl Sector {
     pub fn as_bytes(&self) -> u64 {
@@ -373,9 +374,36 @@ impl modular_bitfield::Specifier for Sector43 {
     }
 }
 
+impl modular_bitfield::Specifier for Sector16 {
+    const BITS: usize = 16;
+
+    type Bytes = u64;
+    type InOut = Sector;
+
+    #[inline]
+    fn into_bytes(input: Self::InOut) -> std::result::Result<Self::Bytes, OutOfBounds> {
+        if input.0 > 1 << Self::BITS {
+            return Err(OutOfBounds);
+        }
+        Ok(input.0)
+    }
+
+    #[inline]
+    fn from_bytes(
+        bytes: Self::Bytes,
+    ) -> std::result::Result<Self::InOut, InvalidBitPattern<Self::Bytes>> {
+        if bytes > 1 << Self::BITS {
+            return Err(InvalidBitPattern {
+                invalid_bytes: bytes,
+            });
+        }
+        Ok(Sector(bytes))
+    }
+}
+
 impl BKey {
     fn btree_ptr_invalid(&self, ca: &BCacheCache) -> bool {
-        if self.key.ptrs() == 0 || self.key.size() == 0 || self.key.dirty() {
+        if self.key.ptrs() == 0 || self.key.size().0 == 0 || self.key.dirty() {
             return false;
         }
 
@@ -388,7 +416,7 @@ impl BKey {
                 let other = p.bucket_remainder(ca);
                 let bucket_number = p.bucket_number(ca);
 
-                if u64::from(self.key.size()) + other > ca.bucket_size
+                if self.key.size().as_bytes() + other > ca.bucket_size
                     || bucket_number < ca.sb.first_bucket.into()
                     || bucket_number >= ca.nbuckets
                 {
