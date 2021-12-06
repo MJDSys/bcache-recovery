@@ -11,7 +11,7 @@ use nom::Err;
 
 use std::collections::HashMap;
 use std::fmt::Debug;
-use std::fs::File;
+use std::fs::{File, OpenOptions};
 use std::io;
 use std::io::prelude::*;
 use std::rc::Rc;
@@ -875,6 +875,53 @@ impl BCacheCache {
         self.make_cache_lookup_for(dev, &self.journal_log, &mut ret);
 
         ret
+    }
+
+    pub fn write_back_cache(&mut self, dev: &mut BCacheBacking) -> Result<()> {
+        let uuids = self.uuids.as_ref().unwrap();
+        let uuid = dev.sb.uuid;
+
+        if self.sb.set_uuid != dev.sb.set_uuid {
+            return Err(BCacheRecoveryError::WriteBackError(
+                WriteBackErrorKind::DifferentSets(self.sb.set_uuid, dev.sb.set_uuid),
+            ));
+        }
+
+        let dev_idx;
+        if let Some(index) = uuids.iter().position(|q| q.uuid == uuid) {
+            dev_idx = index;
+        } else {
+            return Err(BCacheRecoveryError::WriteBackError(
+                WriteBackErrorKind::DeviceNotFound(dev.sb.uuid),
+            ));
+        }
+
+        let lookup = self.make_cache_lookup(dev_idx.try_into()?);
+        let mut buf = vec![0; self.block_size.into()];
+        let buf = &mut buf[..];
+        for (k, d) in lookup {
+            if d.dev() != 0 {
+                panic!("Non-zero dev pointer???");
+            }
+            if d.gen() != self.prio_entries[(d.offset().as_bytes() / self.bucket_size) as usize].gen
+            {
+                return Err(BCacheRecoveryError::WriteBackError(
+                    WriteBackErrorKind::GensDisagree(
+                        d.gen(),
+                        self.prio_entries[(d.offset().as_bytes() / self.bucket_size) as usize].gen,
+                    ),
+                ));
+            }
+            self.backing_file
+                .seek(io::SeekFrom::Start(d.offset().as_bytes()))?;
+            self.backing_file.read_exact(buf)?;
+
+            dev.backing_file.seek(io::SeekFrom::Start(k))?;
+            dev.backing_file.write_all(buf)?;
+        }
+        dev.backing_file.flush()?;
+
+        Ok(())
     }
 }
 

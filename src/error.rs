@@ -17,6 +17,8 @@ pub enum BCacheRecoveryError {
     UnsupportedFeature(UnsupportedFeatureKind),
     #[error("Integer conversion issue (small platform) {0}")]
     IntegerConversionError(#[from] TryFromIntError),
+    #[error("Error during writeback {0}")]
+    WriteBackError(WriteBackErrorKind),
 }
 
 impl From<nom::Err<nom::error::Error<&[u8]>>> for BCacheRecoveryError {
@@ -54,6 +56,19 @@ pub enum UnsupportedFeatureKind {
 }
 
 impl Display for UnsupportedFeatureKind {
+    fn fmt(&self, f: &mut Formatter) -> std::result::Result<(), std::fmt::Error> {
+        write!(f, "{:?}", self)
+    }
+}
+
+#[derive(Debug)]
+pub enum WriteBackErrorKind {
+    DifferentSets([u8; 16], [u8; 16]),
+    DeviceNotFound([u8; 16]),
+    GensDisagree(u8, u8),
+}
+
+impl Display for WriteBackErrorKind {
     fn fmt(&self, f: &mut Formatter) -> std::result::Result<(), std::fmt::Error> {
         write!(f, "{:?}", self)
     }
