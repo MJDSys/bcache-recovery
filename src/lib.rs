@@ -321,7 +321,7 @@ pub struct BKeyKey {
     pub ptrs: B3,
     #[skip]
     __: B1,
-    pub offset: u64,
+    pub offset: Sector,
 }
 
 #[derive(Debug, Clone)]
@@ -580,6 +580,25 @@ impl modular_bitfield::Specifier for Sector16 {
                 invalid_bytes: bytes,
             });
         }
+        Ok(Sector(bytes))
+    }
+}
+
+impl modular_bitfield::Specifier for Sector {
+    const BITS: usize = 64;
+
+    type Bytes = u64;
+    type InOut = Sector;
+
+    #[inline]
+    fn into_bytes(input: Self::InOut) -> std::result::Result<Self::Bytes, OutOfBounds> {
+        Ok(input.0)
+    }
+
+    #[inline]
+    fn from_bytes(
+        bytes: Self::Bytes,
+    ) -> std::result::Result<Self::InOut, InvalidBitPattern<Self::Bytes>> {
         Ok(Sector(bytes))
     }
 }
