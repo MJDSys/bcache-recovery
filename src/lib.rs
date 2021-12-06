@@ -428,7 +428,6 @@ impl BTree {
             let (_, tseq) = nom::number::complete::le_u64(&buf[16..])?;
             if let Some(seq) = seq {
                 if seq == tseq {
-                    println!("{} {:?}", tseq, seq);
                     return Err(BCacheRecoveryError::BCacheError(BCacheErrorKind::BadBtree(
                         bkey.clone(),
                     )));
@@ -465,7 +464,6 @@ pub struct UuidFlags {
 impl Uuid {
     pub fn read(ca: &mut BCacheCache, journal_entry: &JournalSet) -> Result<Vec<Uuid>> {
         let bkey = &journal_entry.uuid_bucket;
-        println!("{:?}", bkey);
         if journal_entry.version != 1 {
             return Err(BCacheRecoveryError::BCacheError(
                 BCacheErrorKind::UnsupportedVersion(journal_entry.version.into()),
