@@ -9,6 +9,7 @@ use modular_bitfield::prelude::*;
 use nom::error::{ErrorKind, ParseError};
 use nom::Err;
 
+use std::collections::HashMap;
 use std::fmt::Debug;
 use std::fs::File;
 use std::io;
@@ -528,6 +529,10 @@ impl Sector {
     pub fn as_bytes(&self) -> u64 {
         self.0 * 512
     }
+
+    pub fn from_byte_offset(offset: u64) -> Self {
+        Self(offset / 512)
+    }
 }
 
 impl modular_bitfield::Specifier for Sector43 {
@@ -831,6 +836,45 @@ impl BCacheCache {
 
     fn bucket_to_byte_offset(&self, bucket_number: u64) -> u64 {
         bucket_number * self.bucket_size
+    }
+}
+
+impl BCacheCache {
+    fn make_cache_lookup_for(&self, dev: u32, keys: &[BKey], lookup: &mut HashMap<u64, BPtr>) {
+        for k in keys {
+            if dev != k.key.inode() {
+                continue;
+            }
+            let start = k.key.offset().as_bytes() - k.key.size().as_bytes();
+            let ptr = k.ptrs[0];
+            for s in 0..k.key.size().as_bytes() / u64::from(self.block_size) {
+                let mut ptr = ptr;
+                let offset = s * u64::from(self.block_size);
+                let cache_offset = ptr.offset().as_bytes() + offset;
+                let back_offset = start + offset;
+                lookup.remove(&back_offset);
+                if k.key.dirty() {
+                    ptr.set_offset(Sector::from_byte_offset(cache_offset));
+                    if lookup.insert(back_offset, ptr).is_some() {
+                        panic!("Was able to insert at {}?", back_offset);
+                    }
+                }
+            }
+        }
+    }
+
+    pub fn make_cache_lookup(&self, dev: u32) -> HashMap<u64, BPtr> {
+        let broot = self.root.as_ref().unwrap();
+        if broot.level != 0 {
+            panic!("BTree root is not level 0 ({})", broot.level);
+        }
+
+        let mut ret = HashMap::new();
+
+        self.make_cache_lookup_for(dev, &broot.keys, &mut ret);
+        self.make_cache_lookup_for(dev, &self.journal_log, &mut ret);
+
+        ret
     }
 }
 
