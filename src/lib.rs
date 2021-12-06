@@ -436,7 +436,6 @@ impl BTree {
             buf = &buf[4096..];
         }
 
-        keys.sort_by_key(|v| v.key.offset());
         Ok(Self::new(bkey, seq.unwrap(), level, keys))
     }
 }
