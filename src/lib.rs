@@ -1,5 +1,5 @@
 mod crc;
-mod error;
+pub mod error;
 
 use crate::error::Result;
 
