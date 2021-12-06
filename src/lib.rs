@@ -883,14 +883,16 @@ pub struct BCacheBacking {
     pub sb: BCacheSB,
     pub data_offset: u64,
     pub flags: BackingFlags,
+    backing_file: File,
 }
 
 impl BCacheBacking {
-    fn new(sb: BCacheSB) -> Result<BCacheBacking> {
+    fn new(sb: BCacheSB, backing_file: File) -> Result<BCacheBacking> {
         Ok(BCacheBacking {
             data_offset: 16,
             flags: sb.flags.into(),
             sb,
+            backing_file,
         })
     }
 }
@@ -909,6 +911,8 @@ pub fn open_device(path: &str) -> Result<BCacheDev> {
     Ok(if sb.is_cache() {
         BCacheDev::Cache(BCacheCache::new(sb, data, f)?)
     } else {
-        BCacheDev::Backing(BCacheBacking::new(sb)?)
+        drop(f);
+        let f = OpenOptions::new().read(true).write(true).open(path)?;
+        BCacheDev::Backing(BCacheBacking::new(sb, f)?)
     })
 }
