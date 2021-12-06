@@ -1,17 +1,19 @@
-fn main() {
+use bcache_recovery::error::*;
+use bcache_recovery::*;
+
+fn main() -> Result<(), BCacheRecoveryError> {
     let mut args = std::env::args();
     args.next().expect("First argument");
+    let cache = args.next().expect("No cache device?");
+    let back = args.next().expect("No backing device?");
+    let mut cache = match open_device(&cache)? {
+        bcache_recovery::BCacheDev::Cache(cache) => cache,
+        _ => panic!("Non-cache device given as cache."),
+    };
+    let mut back = match open_device(&back)? {
+        bcache_recovery::BCacheDev::Backing(back) => back,
+        _ => panic!("Non-backing device given as backing device."),
+    };
 
-    for file in args {
-        println!("Reading {}", file);
-        let dev = bcache_recovery::open_device(&file).expect("Couldn't read dev");
-
-        match dev {
-            bcache_recovery::BCacheDev::Cache(cdev) => {
-                println!("{:?}", cdev);
-                println!("{:?}", cdev.make_cache_lookup(0));
-            }
-            bcache_recovery::BCacheDev::Backing(bdev) => println!("{:?}", bdev),
-        }
-    }
+    cache.write_back_cache(&mut back)
 }

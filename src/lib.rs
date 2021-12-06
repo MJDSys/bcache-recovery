@@ -1,5 +1,5 @@
 mod crc;
-mod error;
+pub mod error;
 
 use crate::error::Result;
 
@@ -11,7 +11,7 @@ use nom::Err;
 
 use std::collections::HashMap;
 use std::fmt::Debug;
-use std::fs::File;
+use std::fs::{File, OpenOptions};
 use std::io;
 use std::io::prelude::*;
 use std::rc::Rc;
@@ -472,14 +472,13 @@ impl Uuid {
 
         let mut ret = vec![];
 
-        let mut buf = vec![0; bkey.key.size().as_bytes().try_into()?];
+        let mut buf = vec![0; ca.bucket_size.try_into()?];
+        ca.backing_file
+            .seek(io::SeekFrom::Start(bkey.ptrs[0].offset().as_bytes()))?;
+        ca.backing_file.read_exact(&mut buf)?;
+        let mut buf = &buf[..];
 
-        for p in bkey.ptrs.iter() {
-            ca.backing_file
-                .seek(io::SeekFrom::Start(p.offset().as_bytes()))?;
-            ca.backing_file.read_exact(&mut buf)?;
-            let buf = buf.as_ref();
-
+        while buf.len() >= 128 {
             let (_, parts) = nom::sequence::tuple((
                 get_d8_16,                     // uuid
                 get_d8_32,                     // label
@@ -490,15 +489,19 @@ impl Uuid {
                 nom::number::complete::le_u64, // sectors
             ))(buf)?;
 
-            ret.push(Uuid {
-                uuid: parts.0,
-                label: parts.1,
-                first_reg: parts.2,
-                last_reg: parts.3,
-                invalidated: parts.4,
-                flags: parts.5.into(),
-                sectors: parts.6,
-            });
+            if parts.0 != [0; 16] {
+                ret.push(Uuid {
+                    uuid: parts.0,
+                    label: parts.1,
+                    first_reg: parts.2,
+                    last_reg: parts.3,
+                    invalidated: parts.4,
+                    flags: parts.5.into(),
+                    sectors: parts.6,
+                });
+            }
+
+            buf = &buf[128..];
         }
 
         Ok(ret)
@@ -846,14 +849,13 @@ impl BCacheCache {
                 continue;
             }
             let start = k.key.offset().as_bytes() - k.key.size().as_bytes();
-            let ptr = k.ptrs[0];
             for s in 0..k.key.size().as_bytes() / u64::from(self.block_size) {
-                let mut ptr = ptr;
                 let offset = s * u64::from(self.block_size);
-                let cache_offset = ptr.offset().as_bytes() + offset;
                 let back_offset = start + offset;
                 lookup.remove(&back_offset);
                 if k.key.dirty() {
+                    let mut ptr = k.ptrs[0];
+                    let cache_offset = ptr.offset().as_bytes() + offset;
                     ptr.set_offset(Sector::from_byte_offset(cache_offset));
                     if lookup.insert(back_offset, ptr).is_some() {
                         panic!("Was able to insert at {}?", back_offset);
@@ -876,6 +878,53 @@ impl BCacheCache {
 
         ret
     }
+
+    pub fn write_back_cache(&mut self, dev: &mut BCacheBacking) -> Result<()> {
+        let uuids = self.uuids.as_ref().unwrap();
+        let uuid = dev.sb.uuid;
+
+        if self.sb.set_uuid != dev.sb.set_uuid {
+            return Err(BCacheRecoveryError::WriteBackError(
+                WriteBackErrorKind::DifferentSets(self.sb.set_uuid, dev.sb.set_uuid),
+            ));
+        }
+
+        let dev_idx;
+        if let Some(index) = uuids.iter().position(|q| q.uuid == uuid) {
+            dev_idx = index;
+        } else {
+            return Err(BCacheRecoveryError::WriteBackError(
+                WriteBackErrorKind::DeviceNotFound(dev.sb.uuid),
+            ));
+        }
+
+        let lookup = self.make_cache_lookup(dev_idx.try_into()?);
+        let mut buf = vec![0; self.block_size.into()];
+        let buf = &mut buf[..];
+        for (k, d) in lookup {
+            if d.dev() != 0 {
+                panic!("Non-zero dev pointer???");
+            }
+            if d.gen() != self.prio_entries[(d.offset().as_bytes() / self.bucket_size) as usize].gen
+            {
+                return Err(BCacheRecoveryError::WriteBackError(
+                    WriteBackErrorKind::GensDisagree(
+                        d.gen(),
+                        self.prio_entries[(d.offset().as_bytes() / self.bucket_size) as usize].gen,
+                    ),
+                ));
+            }
+            self.backing_file
+                .seek(io::SeekFrom::Start(d.offset().as_bytes()))?;
+            self.backing_file.read_exact(buf)?;
+
+            dev.backing_file.seek(io::SeekFrom::Start(k))?;
+            dev.backing_file.write_all(buf)?;
+        }
+        dev.backing_file.flush()?;
+
+        Ok(())
+    }
 }
 
 #[derive(Debug)]
@@ -883,14 +932,16 @@ pub struct BCacheBacking {
     pub sb: BCacheSB,
     pub data_offset: u64,
     pub flags: BackingFlags,
+    backing_file: File,
 }
 
 impl BCacheBacking {
-    fn new(sb: BCacheSB) -> Result<BCacheBacking> {
+    fn new(sb: BCacheSB, backing_file: File) -> Result<BCacheBacking> {
         Ok(BCacheBacking {
             data_offset: 16,
             flags: sb.flags.into(),
             sb,
+            backing_file,
         })
     }
 }
@@ -909,6 +960,8 @@ pub fn open_device(path: &str) -> Result<BCacheDev> {
     Ok(if sb.is_cache() {
         BCacheDev::Cache(BCacheCache::new(sb, data, f)?)
     } else {
-        BCacheDev::Backing(BCacheBacking::new(sb)?)
+        drop(f);
+        let f = OpenOptions::new().read(true).write(true).open(path)?;
+        BCacheDev::Backing(BCacheBacking::new(sb, f)?)
     })
 }
