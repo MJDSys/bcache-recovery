@@ -278,6 +278,7 @@ pub struct BCacheCache {
     pub prio_entries: Vec<BucketPrios>,
     pub root: Option<Rc<BTree>>,
     pub uuids: Option<Vec<Uuid>>,
+    pub journal_log: Vec<BKey>,
 }
 
 #[derive(Debug)]
@@ -692,6 +693,7 @@ impl BCacheCache {
             prio_entries: vec![],
             root: None,
             uuids: None,
+            journal_log: vec![],
             sb,
         };
         if !ret.flags.sync() {
@@ -700,7 +702,7 @@ impl BCacheCache {
             ))
         } else {
             let journal_entries = ret.read_journal()?;
-            let journal_entry = journal_entries.last().unwrap();
+            let journal_entry = journal_entries.into_iter().last().unwrap();
 
             ret.read_prios(journal_entry.prio_bucket[ret.nr_this_dev as usize])?;
 
@@ -716,7 +718,9 @@ impl BCacheCache {
                 journal_entry.btree_level.try_into()?,
             )?);
 
-            ret.uuids = Some(Uuid::read(&mut ret, journal_entry)?);
+            ret.uuids = Some(Uuid::read(&mut ret, &journal_entry)?);
+
+            ret.journal_log = journal_entry.keys;
 
             Ok(ret)
         }
