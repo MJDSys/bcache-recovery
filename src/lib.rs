@@ -9,6 +9,7 @@ use modular_bitfield::prelude::*;
 use nom::error::{ErrorKind, ParseError};
 use nom::Err;
 
+use std::collections::HashMap;
 use std::fmt::Debug;
 use std::fs::File;
 use std::io;
@@ -278,6 +279,7 @@ pub struct BCacheCache {
     pub prio_entries: Vec<BucketPrios>,
     pub root: Option<Rc<BTree>>,
     pub uuids: Option<Vec<Uuid>>,
+    pub journal_log: Vec<BKey>,
 }
 
 #[derive(Debug)]
@@ -295,7 +297,7 @@ pub struct JournalBlock {
 pub struct JournalSet {
     pub seq: u64,
     pub version: u32,
-    pub keys: u32,
+    pub keys: Vec<BKey>,
     pub last_seq: u64,
     pub uuid_bucket: BKey,
     pub btree_root: BKey,
@@ -320,7 +322,7 @@ pub struct BKeyKey {
     pub ptrs: B3,
     #[skip]
     __: B1,
-    pub offset: u64,
+    pub offset: Sector,
 }
 
 #[derive(Debug, Clone)]
@@ -427,7 +429,6 @@ impl BTree {
             let (_, tseq) = nom::number::complete::le_u64(&buf[16..])?;
             if let Some(seq) = seq {
                 if seq == tseq {
-                    println!("{} {:?}", tseq, seq);
                     return Err(BCacheRecoveryError::BCacheError(BCacheErrorKind::BadBtree(
                         bkey.clone(),
                     )));
@@ -436,7 +437,6 @@ impl BTree {
             buf = &buf[4096..];
         }
 
-        keys.sort_by_key(|v| v.key.offset());
         Ok(Self::new(bkey, seq.unwrap(), level, keys))
     }
 }
@@ -464,7 +464,6 @@ pub struct UuidFlags {
 impl Uuid {
     pub fn read(ca: &mut BCacheCache, journal_entry: &JournalSet) -> Result<Vec<Uuid>> {
         let bkey = &journal_entry.uuid_bucket;
-        println!("{:?}", bkey);
         if journal_entry.version != 1 {
             return Err(BCacheRecoveryError::BCacheError(
                 BCacheErrorKind::UnsupportedVersion(journal_entry.version.into()),
@@ -530,6 +529,10 @@ impl Sector {
     pub fn as_bytes(&self) -> u64 {
         self.0 * 512
     }
+
+    pub fn from_byte_offset(offset: u64) -> Self {
+        Self(offset / 512)
+    }
 }
 
 impl modular_bitfield::Specifier for Sector43 {
@@ -582,6 +585,25 @@ impl modular_bitfield::Specifier for Sector16 {
                 invalid_bytes: bytes,
             });
         }
+        Ok(Sector(bytes))
+    }
+}
+
+impl modular_bitfield::Specifier for Sector {
+    const BITS: usize = 64;
+
+    type Bytes = u64;
+    type InOut = Sector;
+
+    #[inline]
+    fn into_bytes(input: Self::InOut) -> std::result::Result<Self::Bytes, OutOfBounds> {
+        Ok(input.0)
+    }
+
+    #[inline]
+    fn from_bytes(
+        bytes: Self::Bytes,
+    ) -> std::result::Result<Self::InOut, InvalidBitPattern<Self::Bytes>> {
         Ok(Sector(bytes))
     }
 }
@@ -643,6 +665,14 @@ impl JournalSet {
             ));
         }
 
+        let mut keys = vec![];
+        let mut left = &left[..8usize * usize::try_from(parts.3)?];
+        while !left.is_empty() {
+            let (lefta, bkey) = get_bkey(None)(left)?;
+            keys.push(bkey);
+            left = lefta;
+        }
+
         let block_size_usize = usize::from(cache.block_size);
         let size_with_pad: usize = (jset_size + block_size_usize - 1) & !(block_size_usize - 1);
         let buf = &buf[size_with_pad..];
@@ -652,12 +682,12 @@ impl JournalSet {
             Some(JournalSet {
                 seq: parts.1,
                 version: parts.2,
-                keys: parts.3,
                 last_seq: parts.4,
                 uuid_bucket: parts.5,
                 btree_root: parts.6,
                 btree_level: parts.7,
                 prio_bucket: parts.9,
+                keys,
             }),
         ))
     }
@@ -684,6 +714,7 @@ impl BCacheCache {
             prio_entries: vec![],
             root: None,
             uuids: None,
+            journal_log: vec![],
             sb,
         };
         if !ret.flags.sync() {
@@ -692,7 +723,7 @@ impl BCacheCache {
             ))
         } else {
             let journal_entries = ret.read_journal()?;
-            let journal_entry = journal_entries.last().unwrap();
+            let journal_entry = journal_entries.into_iter().last().unwrap();
 
             ret.read_prios(journal_entry.prio_bucket[ret.nr_this_dev as usize])?;
 
@@ -708,7 +739,9 @@ impl BCacheCache {
                 journal_entry.btree_level.try_into()?,
             )?);
 
-            ret.uuids = Some(Uuid::read(&mut ret, journal_entry)?);
+            ret.uuids = Some(Uuid::read(&mut ret, &journal_entry)?);
+
+            ret.journal_log = journal_entry.keys;
 
             Ok(ret)
         }
@@ -803,6 +836,45 @@ impl BCacheCache {
 
     fn bucket_to_byte_offset(&self, bucket_number: u64) -> u64 {
         bucket_number * self.bucket_size
+    }
+}
+
+impl BCacheCache {
+    fn make_cache_lookup_for(&self, dev: u32, keys: &[BKey], lookup: &mut HashMap<u64, BPtr>) {
+        for k in keys {
+            if dev != k.key.inode() {
+                continue;
+            }
+            let start = k.key.offset().as_bytes() - k.key.size().as_bytes();
+            let ptr = k.ptrs[0];
+            for s in 0..k.key.size().as_bytes() / u64::from(self.block_size) {
+                let mut ptr = ptr;
+                let offset = s * u64::from(self.block_size);
+                let cache_offset = ptr.offset().as_bytes() + offset;
+                let back_offset = start + offset;
+                lookup.remove(&back_offset);
+                if k.key.dirty() {
+                    ptr.set_offset(Sector::from_byte_offset(cache_offset));
+                    if lookup.insert(back_offset, ptr).is_some() {
+                        panic!("Was able to insert at {}?", back_offset);
+                    }
+                }
+            }
+        }
+    }
+
+    pub fn make_cache_lookup(&self, dev: u32) -> HashMap<u64, BPtr> {
+        let broot = self.root.as_ref().unwrap();
+        if broot.level != 0 {
+            panic!("BTree root is not level 0 ({})", broot.level);
+        }
+
+        let mut ret = HashMap::new();
+
+        self.make_cache_lookup_for(dev, &broot.keys, &mut ret);
+        self.make_cache_lookup_for(dev, &self.journal_log, &mut ret);
+
+        ret
     }
 }
 
