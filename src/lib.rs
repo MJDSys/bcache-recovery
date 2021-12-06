@@ -472,14 +472,13 @@ impl Uuid {
 
         let mut ret = vec![];
 
-        let mut buf = vec![0; bkey.key.size().as_bytes().try_into()?];
+        let mut buf = vec![0; ca.bucket_size.try_into()?];
+        ca.backing_file
+            .seek(io::SeekFrom::Start(bkey.ptrs[0].offset().as_bytes()))?;
+        ca.backing_file.read_exact(&mut buf)?;
+        let mut buf = &buf[..];
 
-        for p in bkey.ptrs.iter() {
-            ca.backing_file
-                .seek(io::SeekFrom::Start(p.offset().as_bytes()))?;
-            ca.backing_file.read_exact(&mut buf)?;
-            let buf = buf.as_ref();
-
+        while buf.len() >= 128 {
             let (_, parts) = nom::sequence::tuple((
                 get_d8_16,                     // uuid
                 get_d8_32,                     // label
@@ -490,15 +489,19 @@ impl Uuid {
                 nom::number::complete::le_u64, // sectors
             ))(buf)?;
 
-            ret.push(Uuid {
-                uuid: parts.0,
-                label: parts.1,
-                first_reg: parts.2,
-                last_reg: parts.3,
-                invalidated: parts.4,
-                flags: parts.5.into(),
-                sectors: parts.6,
-            });
+            if parts.0 != [0; 16] {
+                ret.push(Uuid {
+                    uuid: parts.0,
+                    label: parts.1,
+                    first_reg: parts.2,
+                    last_reg: parts.3,
+                    invalidated: parts.4,
+                    flags: parts.5.into(),
+                    sectors: parts.6,
+                });
+            }
+
+            buf = &buf[128..];
         }
 
         Ok(ret)
