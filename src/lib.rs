@@ -876,6 +876,10 @@ impl BCacheCache {
     fn bucket_to_byte_offset(&self, bucket_number: u64) -> u64 {
         bucket_number * self.bucket_size
     }
+
+    fn offset_to_bucket(&self, offset: u64) -> u64 {
+        (offset + self.bucket_size - 1) / self.bucket_size
+    }
 }
 
 impl BCacheCache {
@@ -942,7 +946,8 @@ impl BCacheCache {
             if d.dev() != 0 {
                 panic!("Non-zero dev pointer???");
             }
-            if d.gen() != self.prio_entries[(d.offset().as_bytes() / self.bucket_size) as usize].gen
+            if d.gen()
+                != self.prio_entries[self.offset_to_bucket(d.offset().as_bytes()) as usize].gen
             {
                 return Err(BCacheRecoveryError::WriteBackError(
                     WriteBackErrorKind::GensDisagree(
