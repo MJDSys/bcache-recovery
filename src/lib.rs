@@ -905,6 +905,9 @@ impl BCacheCache {
                 continue;
             }
             let start = k.key.offset().as_bytes() - k.key.size().as_bytes();
+            if k.key.size().as_bytes() % u64::from(self.block_size) != 0 {
+                panic!("Written data is not divisible by block size {}", k.key.size().as_bytes());
+            }
             for s in 0..k.key.size().as_bytes() / u64::from(self.block_size) {
                 let offset = s * u64::from(self.block_size);
                 let back_offset = start + offset;
