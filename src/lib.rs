@@ -400,6 +400,7 @@ impl BTree {
     }
 
     pub fn read(ca: &mut BCacheCache, bkey: &BKey, level: u8) -> Result<Rc<Self>> {
+        let block_size = usize::from(ca.block_size);
         let mut buf = vec![0u8; bkey.key.size().as_bytes().try_into()?];
         ca.backing_file
             .seek(io::SeekFrom::Start(bkey.ptrs[0].offset().as_bytes()))?;
@@ -456,7 +457,7 @@ impl BTree {
             }
 
             let offset = rest.as_ptr() as usize - buf.as_ptr() as usize;
-            let offset = (offset + 4095) & !4095;
+            let offset = (offset + block_size - 1) & !(block_size - 1);
             buf = &buf[offset..];
         }
 
@@ -469,7 +470,7 @@ impl BTree {
                     )));
                 }
             }
-            buf = &buf[4096..];
+            buf = &buf[block_size..];
         }
 
         Ok(Self::new(bkey, seq.unwrap(), level, keys))
