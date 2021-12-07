@@ -1,6 +1,10 @@
 mod crc;
 pub mod error;
 
+use serde::ser::*;
+use serde::Serialize;
+use serde::Serializer;
+
 use crate::error::Result;
 
 use modular_bitfield::error::InvalidBitPattern;
@@ -76,7 +80,7 @@ pub enum BackingState {
 
 #[bitfield(bits = 64)]
 #[repr(u64)]
-#[derive(Debug)]
+#[derive(Debug, Serialize)]
 pub struct BackingFlags {
     pub mode: CacheMode,
     #[skip]
@@ -87,6 +91,7 @@ pub struct BackingFlags {
 }
 
 #[derive(Debug)]
+#[derive(Serialize)]
 pub struct BCacheSB {
     pub offset: u64,
     pub version: u64,
@@ -102,6 +107,7 @@ pub struct BCacheSB {
     pub last_mount: u32,
     pub first_bucket: u16,
     pub njournal_buckets_or_keys: u16,
+    #[serde(skip_serializing)]
     pub data: [u64; 256],
 }
 
@@ -267,7 +273,9 @@ impl BCacheSB {
 }
 
 #[derive(Debug)]
+#[derive(Serialize)]
 pub struct BCacheCache {
+    #[serde(skip_serializing)]
     backing_file: File,
     pub sb: BCacheSB,
     pub nbuckets: u64,
@@ -275,7 +283,9 @@ pub struct BCacheCache {
     pub bucket_size: u64,
     pub nr_in_set: u16,
     pub nr_this_dev: u16,
+    #[serde(skip_serializing)]
     pub flags: CacheFlags,
+    #[serde(skip_serializing)]
     pub prio_entries: Vec<BucketPrios>,
     pub root: Option<Rc<BTree>>,
     pub uuids: Option<Vec<Uuid>>,
@@ -325,10 +335,24 @@ pub struct BKeyKey {
     pub offset: Sector,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize)]
 pub struct BKey {
     pub key: BKeyKey,
     pub ptrs: Vec<BPtr>,
+}
+
+impl Serialize for BKeyKey {
+    fn serialize<S>(&self, s: S) -> std::result::Result<S::Ok, S::Error>
+        where S: Serializer { 
+        let mut k = s.serialize_struct("BkeyKey", 6)?;
+        k.serialize_field("inode", &self.inode())?;
+        k.serialize_field("size", &self.size().0)?;
+        k.serialize_field("dirty", &self.dirty())?;
+        k.serialize_field("csum", &self.csum())?;
+        k.serialize_field("ptrs", &self.ptrs())?;
+        k.serialize_field("offset", &self.offset().0)?;
+        k.end()
+    }
 }
 
 #[bitfield(bits = 64)]
@@ -342,7 +366,18 @@ pub struct BPtr {
     __: B1,
 }
 
-#[derive(Debug)]
+impl Serialize for BPtr {
+    fn serialize<S>(&self, s: S) -> std::result::Result<S::Ok, S::Error>
+        where S: Serializer { 
+        let mut k = s.serialize_struct("BkeyKey", 3)?;
+        k.serialize_field("gen", &self.gen())?;
+        k.serialize_field("offset", &self.offset().0)?;
+        k.serialize_field("dev", &self.dev())?;
+        k.end()
+    }
+}
+
+#[derive(Debug, Serialize)]
 pub struct BTree {
     pub seq: u64,
     pub parent: Option<Rc<BTree>>,
@@ -441,7 +476,7 @@ impl BTree {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Serialize)]
 pub struct Uuid {
     pub uuid: [u8; 16],
     pub label: [u8; 32],
@@ -454,7 +489,7 @@ pub struct Uuid {
 
 #[bitfield(bits = 32)]
 #[repr(u32)]
-#[derive(Debug)]
+#[derive(Debug, Serialize)]
 pub struct UuidFlags {
     pub flash_only: bool,
     #[skip]
@@ -867,6 +902,7 @@ impl BCacheCache {
 
     pub fn make_cache_lookup(&self, dev: u32) -> HashMap<u64, BPtr> {
         let broot = self.root.as_ref().unwrap();
+        //panic!("{}", broot.level);
         if broot.level != 0 {
             panic!("BTree root is not level 0 ({})", broot.level);
         }
@@ -927,11 +963,12 @@ impl BCacheCache {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Serialize)]
 pub struct BCacheBacking {
     pub sb: BCacheSB,
     pub data_offset: u64,
     pub flags: BackingFlags,
+    #[serde(skip_serializing)]
     backing_file: File,
 }
 
@@ -946,6 +983,7 @@ impl BCacheBacking {
     }
 }
 
+#[derive(Debug, Serialize)]
 pub enum BCacheDev {
     Backing(BCacheBacking),
     Cache(BCacheCache),
