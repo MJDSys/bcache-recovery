@@ -380,21 +380,25 @@ impl Serialize for BPtr {
 #[derive(Debug, Serialize)]
 pub struct BTree {
     pub seq: u64,
-    pub parent: Option<Rc<BTree>>,
     pub flags: u32,
     pub level: u8,
     pub key: BKey,
-    pub keys: Vec<BKey>,
+    pub pointers: BTreeChild,
+}
+
+#[derive(Debug)]
+pub enum BTreeChild {
+    Data(Vec<BKey>),
+    Children(Vec<Rc<BTree>>),
 }
 
 impl BTree {
-    pub fn new(bkey: &BKey, seq: u64, level: u8, keys: Vec<BKey>) -> Rc<Self> {
+    pub fn new(bkey: &BKey, seq: u64, level: u8, pointers: BTreeChild) -> Rc<Self> {
         Rc::new(Self {
             seq,
-            parent: None,
             flags: 0,
             level,
-            keys,
+            pointers,
             key: bkey.clone(),
         })
     }
@@ -473,7 +477,19 @@ impl BTree {
             buf = &buf[block_size..];
         }
 
-        Ok(Self::new(bkey, seq.unwrap(), level, keys))
+        let children = if level == 0 {
+            BTreeChild::Data(keys)
+        } else {
+            let mut children_vec = vec![];
+            for child_key in keys {
+                let bucket = ca.offset_to_bucket(child_key.ptrs[0].offset().as_bytes());
+                if bkey.ptrs[0].gen() == ca.prio_entries[usize::try_from(bucket)?].gen {
+                    children_vec.push(BTree::read(ca, &child_key, level - 1)?);
+                }
+            }
+            BTreeChild::Children(children_vec)
+        };
+        Ok(Self::new(bkey, seq.unwrap(), level, children))
     }
 }
 
@@ -905,16 +921,23 @@ impl BCacheCache {
         }
     }
 
+    fn make_cache_lookup_for_node(&self, dev: u32, node: &BTree, lookup: &mut HashMap<u64, BPtr>) {
+        match &node.pointers {
+            BTreeChild::Data(d) => self.make_cache_lookup_for(dev, d, lookup),
+            BTreeChild::Children(nodes) => {
+                for node in nodes {
+                    self.make_cache_lookup_for_node(dev, node, lookup)
+                }
+            }
+        }
+    }
+
     pub fn make_cache_lookup(&self, dev: u32) -> HashMap<u64, BPtr> {
         let broot = self.root.as_ref().unwrap();
-        //panic!("{}", broot.level);
-        if broot.level != 0 {
-            panic!("BTree root is not level 0 ({})", broot.level);
-        }
 
         let mut ret = HashMap::new();
 
-        self.make_cache_lookup_for(dev, &broot.keys, &mut ret);
+        self.make_cache_lookup_for_node(dev, broot, &mut ret);
         self.make_cache_lookup_for(dev, &self.journal_log, &mut ret);
 
         ret
