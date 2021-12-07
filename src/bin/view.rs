@@ -10,5 +10,8 @@ fn main() -> std::result::Result<(), BCacheRecoveryError> {
 
     //println!("{:?}", dev);
     println!("{}", serde_json::to_string_pretty(&dev).unwrap());
+    if let BCacheDev::Cache(x) = dev {
+        x.make_cache_lookup(0);
+    }
     Ok(())
 }

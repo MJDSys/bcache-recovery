@@ -90,8 +90,7 @@ pub struct BackingFlags {
     ___: B1,
 }
 
-#[derive(Debug)]
-#[derive(Serialize)]
+#[derive(Debug, Serialize)]
 pub struct BCacheSB {
     pub offset: u64,
     pub version: u64,
@@ -272,8 +271,7 @@ impl BCacheSB {
     }
 }
 
-#[derive(Debug)]
-#[derive(Serialize)]
+#[derive(Debug, Serialize)]
 pub struct BCacheCache {
     #[serde(skip_serializing)]
     backing_file: File,
@@ -343,7 +341,9 @@ pub struct BKey {
 
 impl Serialize for BKeyKey {
     fn serialize<S>(&self, s: S) -> std::result::Result<S::Ok, S::Error>
-        where S: Serializer { 
+    where
+        S: Serializer,
+    {
         let mut k = s.serialize_struct("BkeyKey", 6)?;
         k.serialize_field("inode", &self.inode())?;
         k.serialize_field("size", &self.size().0)?;
@@ -368,7 +368,9 @@ pub struct BPtr {
 
 impl Serialize for BPtr {
     fn serialize<S>(&self, s: S) -> std::result::Result<S::Ok, S::Error>
-        where S: Serializer { 
+    where
+        S: Serializer,
+    {
         let mut k = s.serialize_struct("BkeyKey", 3)?;
         k.serialize_field("gen", &self.gen())?;
         k.serialize_field("offset", &self.offset().0)?;
@@ -386,7 +388,7 @@ pub struct BTree {
     pub pointers: BTreeChild,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Serialize)]
 pub enum BTreeChild {
     Data(Vec<BKey>),
     Children(Vec<Rc<BTree>>),
@@ -906,7 +908,10 @@ impl BCacheCache {
             }
             let start = k.key.offset().as_bytes() - k.key.size().as_bytes();
             if k.key.size().as_bytes() % u64::from(self.block_size) != 0 {
-                panic!("Written data is not divisible by block size {}", k.key.size().as_bytes());
+                panic!(
+                    "Written data is not divisible by block size {}",
+                    k.key.size().as_bytes()
+                );
             }
             for s in 0..k.key.size().as_bytes() / u64::from(self.block_size) {
                 let offset = s * u64::from(self.block_size);
